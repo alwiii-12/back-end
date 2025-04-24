@@ -1,7 +1,7 @@
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
+import os  # <- needed to get PORT from environment
 
 app = Flask(__name__)
 CORS(app)
@@ -28,3 +28,11 @@ def submit():
         'message': '✅ Within tolerance' if within_tolerance else '❌ Out of tolerance',
         'within_tolerance': within_tolerance
     })
+
+@app.route('/results', methods=['GET'])
+def get_results():
+    return jsonify(results)
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)

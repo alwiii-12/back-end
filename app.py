@@ -25,13 +25,6 @@ def submit():
     results.append(record)
 
     return jsonify({
-        'message': f"{'✅ Within' if within_tolerance else '❌ Out'} of tolerance",
+        'message': '✅ Within tolerance' if within_tolerance else '❌ Out of tolerance',
         'within_tolerance': within_tolerance
     })
-
-@app.route('/results', methods=['GET'])
-def get_results():
-    return jsonify(results)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)

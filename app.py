@@ -1,7 +1,8 @@
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
-import os  # <- needed to get PORT from environment
+import pytz
 
 app = Flask(__name__)
 CORS(app)
@@ -14,13 +15,16 @@ def submit():
     output = float(data['output'])
     within_tolerance = 0.97 <= output <= 1.03
 
+    ist = pytz.timezone('Asia/Kolkata')
+    timestamp = datetime.now(ist).isoformat()
+
     record = {
         'date': data['date'],
         'machine': data['machine'],
         'output': output,
         'within_tolerance': within_tolerance,
         'comments': data.get('comments', ''),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': timestamp
     }
     results.append(record)
 
@@ -34,5 +38,4 @@ def get_results():
     return jsonify(results)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=10000)

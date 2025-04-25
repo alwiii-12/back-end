@@ -32,7 +32,7 @@ def upload_file():
             result = {
                 'date': str(row['Date']),
                 'variation': variation,
-                'within_tolerance': -0.02 <= variation <= 0.02
+                'within_tolerance': -2 <= variation <= 2
             }
             results.append(result)
 

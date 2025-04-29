@@ -24,14 +24,20 @@ def upload_file():
         return jsonify({'error': 'No file provided'}), 400
 
     try:
-        df = pd.read_excel(file)
-        df.columns = df.columns.str.strip()  # Remove whitespace from column names
-        print("Columns read from Excel:", df.columns.tolist())  # Debug line
+        # Read the file without using any index column
+        df = pd.read_excel(file, index_col=None)
 
+        # Strip spaces and drop Unnamed/index columns
+        df.columns = df.columns.str.strip()
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+
+        print("Columns read from Excel:", df.columns.tolist())
+
+        # Check for 'Test' column
         if 'Test' not in df.columns:
-            return jsonify({'error': 'Excel file must contain a "Test" column'}), 400
+            return jsonify({'error': 'Excel must have a "Test" column.'}), 400
 
-        df = df.dropna(subset=['Test'])  # Ensure Test column has values
+        df = df.dropna(subset=['Test'])
 
         results = []
         for _, row in df.iterrows():
@@ -53,7 +59,7 @@ def upload_file():
         return jsonify(results)
 
     except Exception as e:
-        print("Upload error:", str(e))  # Log to server for debugging
+        print("Upload error:", str(e))
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':

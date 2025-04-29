@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-gunicorn
-pandas
-openpyxl
-sqlalchemy
-python-multipart

@@ -1,12 +1,11 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
-import datetime
 
 app = Flask(__name__)
 CORS(app)
 
-TOLERANCE = 2.0  # ±2% threshold
+TOLERANCE = 2.0  # ±2%
 
 def evaluate_status(variation):
     if pd.isna(variation):
@@ -25,8 +24,14 @@ def upload_file():
         return jsonify({'error': 'No file provided'}), 400
 
     try:
-        df = pd.read_excel(file, sheet_name=0)
-        df = df.dropna(subset=['Test'])  # Ensure 'Test' (energy) exists
+        df = pd.read_excel(file)
+        df.columns = df.columns.str.strip()  # Remove whitespace from column names
+        print("Columns read from Excel:", df.columns.tolist())  # Debug line
+
+        if 'Test' not in df.columns:
+            return jsonify({'error': 'Excel file must contain a "Test" column'}), 400
+
+        df = df.dropna(subset=['Test'])  # Ensure Test column has values
 
         results = []
         for _, row in df.iterrows():
@@ -48,6 +53,7 @@ def upload_file():
         return jsonify(results)
 
     except Exception as e:
+        print("Upload error:", str(e))  # Log to server for debugging
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':

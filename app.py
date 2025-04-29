@@ -1,53 +1,38 @@
+# Replace this block in your existing app.py
+
+import pandas as pd
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import pandas as pd
-import os
 
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/upload', methods=['POST'])
+@app.route("/upload", methods=["POST"])
 def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files["file"]
+    df = pd.read_excel(file)
 
-    file = request.files['file']
-
-    try:
-        df = pd.read_excel(file)
-    except Exception as e:
-        return jsonify({"error": f"Error reading Excel file: {str(e)}"}), 500
+    # Adjust column names based on the Excel structure
+    # Print for debugging
+    print("Columns in uploaded file:", df.columns.tolist())
 
     results = []
-
     for index, row in df.iterrows():
-        # Adjusted to support your actual column names
-        date = row.get("Date") or row.get("date") or row.get("Measurement Date")
-        variation = row.get("Output (%)") or row.get("variation") or row.get("Output Variation")
-
-        if date is None or variation is None:
+        variation = row.get("Variation")  # <-- make sure this matches Excel column name
+        date = row.get("Date")  # same here
+        if pd.isna(variation) or pd.isna(date):
             continue
 
-        try:
-            variation = float(variation)
-        except ValueError:
-            continue
-
-        # Evaluation logic with warning margin
         status = "Pass"
         if abs(variation) > 2:
             status = "Fail"
-        elif abs(variation) >= 1.8:
+        elif abs(variation) > 1:
             status = "Warning"
 
         results.append({
-            "date": str(date),
-            "variation": variation,
-            "status": status
+            "Date": str(date),
+            "Variation": round(variation, 2),
+            "Status": status,
         })
 
-    return jsonify(results)
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    return jsonify({"results": results})

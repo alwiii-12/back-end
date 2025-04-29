@@ -1,55 +1,54 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
-from werkzeug.utils import secure_filename
-import os
+import datetime
 
 app = Flask(__name__)
 CORS(app)
 
+TOLERANCE = 2.0  # ±2% threshold
+
+def evaluate_status(variation):
+    if pd.isna(variation):
+        return "N/A"
+    elif abs(variation) < TOLERANCE:
+        return "Within Tolerance"
+    elif abs(variation) == TOLERANCE:
+        return "Warning"
+    else:
+        return "Out of Tolerance"
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part in request"}), 400
-
-    file = request.files['file']
-
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
-
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        return jsonify({"error": "Only Excel files are supported"}), 400
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': 'No file provided'}), 400
 
     try:
-        df = pd.read_excel(file)
-
-        if 'Variation' not in df.columns or 'Date' not in df.columns:
-            return jsonify({"error": "Excel must contain 'Date' and 'Variation' columns"}), 400
+        df = pd.read_excel(file, sheet_name=0)
+        df = df.dropna(subset=['Test'])  # Ensure 'Test' (energy) exists
 
         results = []
         for _, row in df.iterrows():
-            variation = row['Variation']
-            abs_var = abs(variation)
-
-            if abs_var <= 2:
-                if abs_var >= 1.8:
-                    status = "Warning"
-                else:
-                    status = "Within Tolerance"
-            else:
-                status = "Out of Tolerance"
-
-            result = {
-                'date': str(row['Date']),
-                'variation': variation,
-                'status': status
-            }
-            results.append(result)
+            energy = row['Test']
+            for col in df.columns[2:]:  # Skip 'Test' and 'Tolerance (%)'
+                try:
+                    date = pd.to_datetime(col).strftime('%Y-%m-%d')
+                except:
+                    date = str(col)
+                variation = row[col]
+                status = evaluate_status(variation)
+                results.append({
+                    'energy': energy,
+                    'date': date,
+                    'variation': round(variation, 2) if pd.notna(variation) else None,
+                    'status': status
+                })
 
         return jsonify(results)
 
     except Exception as e:
-        return jsonify({"error": f"Invalid Excel file or format: {str(e)}"}), 400
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

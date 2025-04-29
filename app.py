@@ -29,10 +29,20 @@ def upload_file():
         results = []
         for _, row in df.iterrows():
             variation = row['Variation']
+            abs_var = abs(variation)
+
+            if abs_var <= 2:
+                if abs_var >= 1.8:
+                    status = "Warning"
+                else:
+                    status = "Within Tolerance"
+            else:
+                status = "Out of Tolerance"
+
             result = {
                 'date': str(row['Date']),
                 'variation': variation,
-                'within_tolerance': -2 <= variation <= 2
+                'status': status
             }
             results.append(result)
 

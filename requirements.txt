@@ -1,7 +1,6 @@
 fastapi
 uvicorn
-sqlalchemy
-openpyxl
-pandas
-python-multipart
 gunicorn
+pandas
+openpyxl
+sqlalchemy

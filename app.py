@@ -1,117 +1,96 @@
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
-import pandas as pd
-import sqlite3
+from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine
+from models import Base, OutputVariation
+import openpyxl
 import io
-import os
+import csv
 
-app = Flask(__name__)
-CORS(app)
+# Create database tables
+Base.metadata.create_all(bind=engine)
 
-# Initialize SQLite database
-def init_db():
-    conn = sqlite3.connect("evaluations.db")
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS evaluations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            variation TEXT NOT NULL,
-            status TEXT NOT NULL
-        )
-    ''')
-    conn.commit()
-    conn.close()
+app = FastAPI()
 
-init_db()
+# Allow frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # You can restrict to your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Route: Upload Excel file
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
-
+# Dependency
+def get_db():
+    db = SessionLocal()
     try:
-        df = pd.read_excel(file)
+        yield db
+    finally:
+        db.close()
 
-        if "Date" not in df.columns or "Variation" not in df.columns:
-            return jsonify({"error": "Excel must contain 'Date' and 'Variation' columns."}), 400
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    contents = await file.read()
+    workbook = openpyxl.load_workbook(io.BytesIO(contents))
+    sheet = workbook.active
 
-        evaluation_results = []
-        for _, row in df.iterrows():
-            date = str(row["Date"]).split(" ")[0]  # get only date part
-            variation = row["Variation"]
-            status = ""
+    results = []
 
-            if abs(variation) <= 0.02:
-                status = "Pass"
-            elif abs(variation) <= 0.03:
-                status = "Warning"
-            else:
-                status = "Fail"
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        date, raw_variation = row[0], row[1]
 
-            result = {
-                "date": date,
-                "variation": f"{variation:.1%}",
-                "status": status
-            }
-            evaluation_results.append(result)
+        if date is None or raw_variation is None:
+            continue
 
-        # Save to SQLite database
-        conn = sqlite3.connect("evaluations.db")
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM evaluations")  # Clear old data (optional)
-        for entry in evaluation_results:
-            cursor.execute(
-                'INSERT INTO evaluations (date, variation, status) VALUES (?, ?, ?)',
-                (entry['date'], entry['variation'], entry['status'])
-            )
-        conn.commit()
-        conn.close()
+        try:
+            variation = float(raw_variation)
+        except ValueError:
+            continue
 
-        return jsonify({"results": evaluation_results})
+        # Assign status based on tolerance
+        if abs(variation) <= 2:
+            status = "Pass"
+        elif abs(variation) <= 3:
+            status = "Warning"
+        else:
+            status = "Fail"
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # Save to DB
+        entry = OutputVariation(date=str(date), variation=variation, status=status)
+        db.add(entry)
 
-# Route: Download current evaluation results as CSV
-@app.route('/download_csv', methods=['POST'])
-def download_csv():
-    data = request.get_json()
-    df = pd.DataFrame(data["results"])
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
+        results.append({
+            "date": str(date),
+            "variation": round(variation, 1),
+            "status": status
+        })
 
-    return Response(
-        csv_buffer.getvalue(),
-        mimetype="text/csv",
-        headers={"Content-disposition": "attachment; filename=evaluation_results.csv"}
-    )
+    db.commit()
+    return JSONResponse(content={"results": results})
 
-# Route: Download saved results from database
-@app.route('/download_saved_csv')
-def download_saved_csv():
-    conn = sqlite3.connect("evaluations.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT date, variation, status FROM evaluations")
-    rows = cursor.fetchall()
-    conn.close()
+@app.post("/download_csv")
+async def download_csv(data: dict):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Date", "Variation", "Status"])
+    for item in data.get("results", []):
+        writer.writerow([item["date"], item["variation"], item["status"]])
+    output.seek(0)
+    return StreamingResponse(iter([output.getvalue()]),
+                             media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=evaluation_results.csv"})
 
-    df = pd.DataFrame(rows, columns=["Date", "Variation", "Status"])
-
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-
-    return Response(
-        csv_buffer.getvalue(),
-        mimetype="text/csv",
-        headers={"Content-disposition": "attachment; filename=saved_evaluation_results.csv"}
-    )
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+@app.get("/download_saved_csv")
+def download_saved_csv(db: Session = Depends(get_db)):
+    entries = db.query(OutputVariation).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Date", "Variation", "Status"])
+    for item in entries:
+        writer.writerow([item.date, item.variation, item.status])
+    output.seek(0)
+    return StreamingResponse(iter([output.getvalue()]),
+                             media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=saved_results.csv"})

@@ -1,66 +1,73 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import pandas as pd
+import sqlite3
+import os
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
 
-TOLERANCE = 2.0  # ±2%
+DB_NAME = "linac_data.db"
+TOLERANCE = 2.0
 
-def evaluate_status(variation):
-    if pd.isna(variation):
+def init_db():
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS qa_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            energy TEXT,
+            date TEXT,
+            variation REAL,
+            status TEXT,
+            month TEXT,
+            year INTEGER
+        )''')
+
+init_db()
+
+def evaluate_status(value):
+    if value is None:
         return "N/A"
-    elif abs(variation) < TOLERANCE:
+    val = abs(value)
+    if val < TOLERANCE:
         return "Within Tolerance"
-    elif abs(variation) == TOLERANCE:
+    elif val == TOLERANCE:
         return "Warning"
     else:
         return "Out of Tolerance"
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    file = request.files.get('file')
-    if not file:
-        return jsonify({'error': 'No file provided'}), 400
+@app.route('/save', methods=['POST'])
+def save_data():
+    data = request.get_json()
+    month = data['month']
+    year = data['year']
+    headers = data['headers'][1:]  # skip 'Energy'
+    rows = data['rows']
 
     try:
-        # Read the file without using any index column
-        df = pd.read_excel(file, index_col=None)
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                energy = row[0]
+                for i, val in enumerate(row[1:]):
+                    if val is None or val == '':
+                        continue
+                    date_str = f"{headers[i]}-{year}"
+                    try:
+                        date_obj = datetime.strptime(date_str, "%d-%b-%Y")
+                        status = evaluate_status(float(val))
+                        cursor.execute(
+                            '''INSERT INTO qa_data (energy, date, variation, status, month, year)
+                               VALUES (?, ?, ?, ?, ?, ?)''',
+                            (energy, date_obj.date().isoformat(), val, status, month, year)
+                        )
+                    except Exception as e:
+                        print(f"Skipping invalid cell: {val} at {headers[i]}: {e}")
 
-        # Strip spaces and drop Unnamed/index columns
-        df.columns = df.columns.str.strip()
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-
-        print("Columns read from Excel:", df.columns.tolist())
-
-        # Check for 'Test' column
-        if 'Test' not in df.columns:
-            return jsonify({'error': 'Excel must have a "Test" column.'}), 400
-
-        df = df.dropna(subset=['Test'])
-
-        results = []
-        for _, row in df.iterrows():
-            energy = row['Test']
-            for col in df.columns[2:]:  # Skip 'Test' and 'Tolerance (%)'
-                try:
-                    date = pd.to_datetime(col).strftime('%Y-%m-%d')
-                except:
-                    date = str(col)
-                variation = row[col]
-                status = evaluate_status(variation)
-                results.append({
-                    'energy': energy,
-                    'date': date,
-                    'variation': round(variation, 2) if pd.notna(variation) else None,
-                    'status': status
-                })
-
-        return jsonify(results)
+        return jsonify({"message": "Data saved successfully."}), 200
 
     except Exception as e:
-        print("Upload error:", str(e))
-        return jsonify({'error': str(e)}), 500
+        print("Save error:", e)
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

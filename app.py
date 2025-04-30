@@ -40,12 +40,16 @@ def save_data():
     data = request.get_json()
     month = data['month']
     year = data['year']
-    headers = data['headers'][1:]  # skip 'Energy'
+    headers = data['headers'][1:]
     rows = data['rows']
 
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
+
+            # Optional: clear old data for this month
+            cursor.execute("DELETE FROM qa_data WHERE month = ? AND year = ?", (month, year))
+
             for row in rows:
                 energy = row[0]
                 for i, val in enumerate(row[1:]):
@@ -67,6 +71,36 @@ def save_data():
 
     except Exception as e:
         print("Save error:", e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/load', methods=['POST'])
+def load_data():
+    data = request.get_json()
+    month = data.get('month')
+    year = data.get('year')
+
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT energy, date, variation FROM qa_data
+                   WHERE month = ? AND year = ?''',
+                (month, year)
+            )
+            rows = cursor.fetchall()
+
+        structured = {}
+        for energy, date_str, val in rows:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            label = date_obj.strftime("%d-%b")
+            if energy not in structured:
+                structured[energy] = {}
+            structured[energy][label] = val
+
+        return jsonify(structured)
+
+    except Exception as e:
+        print("Load error:", e)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':

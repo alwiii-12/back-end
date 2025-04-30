@@ -1,107 +1,42 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
-import os
-from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
 
-DB_NAME = "linac_data.db"
-TOLERANCE = 2.0
+DB = "linac_data.db"
 
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS qa_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            energy TEXT,
-            date TEXT,
-            variation REAL,
-            status TEXT,
-            month TEXT,
-            year INTEGER
-        )''')
-
-init_db()
-
-def evaluate_status(value):
-    if value is None:
-        return "N/A"
-    val = abs(value)
-    if val < TOLERANCE:
-        return "Within Tolerance"
-    elif val == TOLERANCE:
-        return "Warning"
-    else:
-        return "Out of Tolerance"
-
-@app.route('/save', methods=['POST'])
-def save_data():
-    data = request.get_json()
-    month = data['month']
-    year = data['year']
-    headers = data['headers'][1:]
-    rows = data['rows']
-
-    try:
-        with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-
-            # Optional: clear old data for this month
-            cursor.execute("DELETE FROM qa_data WHERE month = ? AND year = ?", (month, year))
-
-            for row in rows:
-                energy = row[0]
-                for i, val in enumerate(row[1:]):
-                    if val is None or val == '':
-                        continue
-                    date_str = f"{headers[i]}-{year}"
-                    try:
-                        date_obj = datetime.strptime(date_str, "%d-%b-%Y")
-                        status = evaluate_status(float(val))
-                        cursor.execute(
-                            '''INSERT INTO qa_data (energy, date, variation, status, month, year)
-                               VALUES (?, ?, ?, ?, ?, ?)''',
-                            (energy, date_obj.date().isoformat(), val, status, month, year)
-                        )
-                    except Exception as e:
-                        print(f"Skipping invalid cell: {val} at {headers[i]}: {e}")
-
-        return jsonify({"message": "Data saved successfully."}), 200
-
-    except Exception as e:
-        print("Save error:", e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/load', methods=['POST'])
-def load_data():
-    data = request.get_json()
-    month = data.get('month')
-    year = data.get('year')
-
-    try:
-        with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                '''SELECT energy, date, variation FROM qa_data
-                   WHERE month = ? AND year = ?''',
-                (month, year)
+    with sqlite3.connect(DB) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS output (
+                date TEXT,
+                energy TEXT,
+                variation REAL,
+                PRIMARY KEY (date, energy)
             )
-            rows = cursor.fetchall()
+        """)
 
-        structured = {}
-        for energy, date_str, val in rows:
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-            label = date_obj.strftime("%d-%b")
-            if energy not in structured:
-                structured[energy] = {}
-            structured[energy][label] = val
+@app.route('/save-entry', methods=['POST'])
+def save_entry():
+    data = request.get_json()
+    with sqlite3.connect(DB) as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO output (date, energy, variation)
+            VALUES (?, ?, ?)
+        """, (data['date'], data['energy'], data['variation']))
+    return jsonify({"status": "success"})
 
-        return jsonify(structured)
-
-    except Exception as e:
-        print("Load error:", e)
-        return jsonify({"error": str(e)}), 500
+@app.route('/get-data')
+def get_data():
+    year = request.args.get('year')
+    month = request.args.get('month').zfill(2)
+    with sqlite3.connect(DB) as conn:
+        cursor = conn.execute("SELECT date, energy, variation FROM output WHERE date LIKE ?", (f"{year}-{month}-%",))
+        entries = [{"date": r[0], "energy": r[1], "variation": r[2]} for r in cursor.fetchall()]
+    return jsonify({"data": entries})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    init_db()
+    app.run(host='0.0.0.0', port=10000)

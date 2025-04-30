@@ -1,107 +1,105 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
 import smtplib
 from email.mime.text import MIMEText
-import os
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
-CORS(app, supports_credentials=True)
+CORS(app)  # Enable CORS
 
-DB_NAME = "linac_data.db"
+DATABASE = 'linac_data.db'
 
+# Initialize DB
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS monthly_data (
-            month TEXT PRIMARY KEY,
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS linac_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            month TEXT,
             data TEXT
         )
-    """)
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# === Email config ===
-SENDER_EMAIL = "itsmealwin12@gmail.com"
-APP_PASSWORD = "tjvyksuerpnkxmaf"  # No spaces!
-RECIPIENT_EMAIL = "alwinjose812@gmail.com"
+# Send email alert if out of tolerance
+def send_email_alert(date, energy, value):
+    sender_email = "itsmealwin12@gmail.com"
+    receiver_email = "alwinjose812@gmail.com"
+    app_password = "tjvy ksue rpnk xmaf"
 
-def send_failure_email(failed_entries, month):
-    if not failed_entries:
-        return
+    subject = f"⚠️ LINAC QA Failed on {date}"
+    body = f"The LINAC QA value for {energy} on {date} is {value}%, which is out of tolerance (±2.0%)."
 
-    body = f"⚠️ QA Failures Detected for {month}:\n\n"
-    for entry in failed_entries:
-        body += f"- {entry['Energy']} on {entry['Date']} = {entry['Value']}% ❌\n"
-
-    msg = MIMEText(body)
-    msg["Subject"] = f"❌ LINAC QA Failure Alert - {month}"
-    msg["From"] = SENDER_EMAIL
-    msg["To"] = RECIPIENT_EMAIL
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = receiver_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(SENDER_EMAIL, APP_PASSWORD)
-            smtp.send_message(msg)
-            print("QA failure alert sent.")
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, app_password)
+        server.send_message(msg)
+        server.quit()
+        print("Alert email sent.")
     except Exception as e:
-        print("Error sending email:", e)
+        print("Failed to send email:", e)
 
-@app.route('/')
-def home():
-    return "LINAC QA backend running."
-
-@app.route('/save_month_data', methods=['POST'])
-def save_month_data():
-    content = request.get_json()
+# Save data
+@app.route('/save_data', methods=['POST'])
+def save_data():
+    content = request.json
     month = content['month']
     data = content['data']
 
-    # Check for failed values > 2.0%
-    failed = []
+    # Check for out-of-tolerance values and send email
     try:
-        for row in data:
+        for row in data[1:]:  # Skip header row
             energy = row[0]
-            for i, val in enumerate(row[1:], start=1):
+            for i in range(1, len(row)):
                 try:
-                    v = float(val)
-                    if abs(v) > 2.0:
-                        day = f"{month}-{str(i).zfill(2)}"
-                        failed.append({"Energy": energy, "Date": day, "Value": v})
+                    value = float(row[i])
+                    if abs(value) > 2.0:
+                        date = data[0][i]
+                        send_email_alert(date, energy, value)
                 except:
                     continue
     except Exception as e:
-        print("Scan error:", e)
-
-    # Send alert if needed
-    send_failure_email(failed, month)
+        print("Error scanning data:", e)
 
     # Save to DB
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("REPLACE INTO monthly_data (month, data) VALUES (?, ?)", (month, str(data)))
+    c.execute("SELECT id FROM linac_data WHERE month = ?", (month,))
+    existing = c.fetchone()
+    if existing:
+        c.execute("UPDATE linac_data SET data = ? WHERE month = ?", (str(data), month))
+    else:
+        c.execute("INSERT INTO linac_data (month, data) VALUES (?, ?)", (month, str(data)))
     conn.commit()
     conn.close()
+    return jsonify({"status": "success"})
 
-    return jsonify({"message": "Data saved successfully."})
-
-@app.route('/load_month_data', methods=['GET'])
-def load_month_data():
-    month = request.args.get("month")
-    conn = sqlite3.connect(DB_NAME)
+# Load data
+@app.route('/load_data', methods=['GET'])
+def load_data():
+    month = request.args.get('month')
+    conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("SELECT data FROM monthly_data WHERE month = ?", (month,))
-    row = c.fetchone()
+    c.execute("SELECT data FROM linac_data WHERE month = ?", (month,))
+    result = c.fetchone()
     conn.close()
-    if row:
-        import ast
-        return jsonify({"data": ast.literal_eval(row[0])})
+    if result:
+        return jsonify({"data": eval(result[0])})
     else:
         return jsonify({"data": None})
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     app.run(debug=True)

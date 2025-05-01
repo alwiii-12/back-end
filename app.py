@@ -8,13 +8,12 @@ from email.mime.multipart import MIMEMultipart
 app = Flask(__name__)
 CORS(app)
 
-# === CONFIGURATION ===
 DB_NAME = 'linac_data.db'
 SENDER_EMAIL = 'itsmealwin12@gmail.com'
 RECEIVER_EMAIL = 'alwinjose812@gmail.com'
-APP_PASSWORD = 'tjvy ksue rpnk xmaf'  # You should move this to an environment variable in production
+APP_PASSWORD = 'tjvy ksue rpnk xmaf'
 
-# === SETUP DATABASE ===
+# === Initialize database ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -30,26 +29,7 @@ def init_db():
 
 init_db()
 
-# === EMAIL FUNCTION ===
-def send_email(subject, body):
-    msg = MIMEMultipart()
-    msg['From'] = SENDER_EMAIL
-    msg['To'] = RECEIVER_EMAIL
-    msg['Subject'] = subject
-
-    msg.attach(MIMEText(body, 'plain'))
-
-    try:
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
-            server.login(SENDER_EMAIL, APP_PASSWORD)
-            server.send_message(msg)
-        print("Email sent successfully.")
-    except Exception as e:
-        print(f"Email sending failed: {e}")
-
-# === ROUTES ===
-
+# === Save QA data ===
 @app.route('/save', methods=['POST'])
 def save_data():
     content = request.get_json()
@@ -62,12 +42,9 @@ def save_data():
     cursor.execute('INSERT INTO output_data (month, data) VALUES (?, ?)', (month, data))
     conn.commit()
     conn.close()
-
-    # Send email alert
-    send_email(f'Data Saved for {month}', f'The following data was saved:\n\n{data}')
-
     return jsonify({'status': 'success'})
 
+# === Load QA data ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month = request.args.get('month')
@@ -76,11 +53,36 @@ def get_data():
     cursor.execute('SELECT data FROM output_data WHERE month = ?', (month,))
     row = cursor.fetchone()
     conn.close()
+    return jsonify({'data': eval(row[0]) if row else []})
 
-    if row:
-        return jsonify({'month': month, 'data': row[0]})
-    else:
-        return jsonify({'error': 'No data found for that month'}), 404
+# === Email alert for failed values ===
+@app.route('/send-alert', methods=['POST'])
+def send_alert():
+    content = request.get_json()
+    out_values = content.get('outValues', [])
+    if not out_values:
+        return jsonify({'status': 'no alerts sent'})
+
+    message_body = "The following LINAC QA output values are out of tolerance (±2.0%):\n\n"
+    for val in out_values:
+        message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
+
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = RECEIVER_EMAIL
+    msg['Subject'] = '⚠ LINAC QA Output Failed Alert'
+
+    msg.attach(MIMEText(message_body, 'plain'))
+
+    try:
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return jsonify({'status': 'alert sent'})
+    except Exception as e:
+        print("Email sending error:", e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

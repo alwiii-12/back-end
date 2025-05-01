@@ -4,22 +4,25 @@ import sqlite3
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS
+CORS(app)
 
-DATABASE = 'linac_data.db'
+# === CONFIGURATION ===
+DB_NAME = 'linac_data.db'
+SENDER_EMAIL = 'itsmealwin12@gmail.com'
+RECEIVER_EMAIL = 'alwinjose812@gmail.com'
+APP_PASSWORD = 'tjvy ksue rpnk xmaf'
 
-# Initialize DB
+# === SETUP DATABASE ===
 def init_db():
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS linac_data (
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS output_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            month TEXT,
-            data TEXT
+            month TEXT NOT NULL,
+            data TEXT NOT NULL
         )
     ''')
     conn.commit()
@@ -27,79 +30,59 @@ def init_db():
 
 init_db()
 
-# Send email alert if out of tolerance
-def send_email_alert(date, energy, value):
-    sender_email = "itsmealwin12@gmail.com"
-    receiver_email = "alwinjose812@gmail.com"
-    app_password = "tjvy ksue rpnk xmaf"
+# === ROUTES ===
 
-    subject = f"⚠️ LINAC QA Failed on {date}"
-    body = f"The LINAC QA value for {energy} on {date} is {value}%, which is out of tolerance (±2.0%)."
-
-    msg = MIMEMultipart()
-    msg["From"] = sender_email
-    msg["To"] = receiver_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
-    try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(sender_email, app_password)
-        server.send_message(msg)
-        server.quit()
-        print("Alert email sent.")
-    except Exception as e:
-        print("Failed to send email:", e)
-
-# Save data
-@app.route('/save_data', methods=['POST'])
+@app.route('/save', methods=['POST'])
 def save_data():
-    content = request.json
+    content = request.get_json()
     month = content['month']
-    data = content['data']
+    data = str(content['data'])
 
-    # Check for out-of-tolerance values and send email
-    try:
-        for row in data[1:]:  # Skip header row
-            energy = row[0]
-            for i in range(1, len(row)):
-                try:
-                    value = float(row[i])
-                    if abs(value) > 2.0:
-                        date = data[0][i]
-                        send_email_alert(date, energy, value)
-                except:
-                    continue
-    except Exception as e:
-        print("Error scanning data:", e)
-
-    # Save to DB
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT id FROM linac_data WHERE month = ?", (month,))
-    existing = c.fetchone()
-    if existing:
-        c.execute("UPDATE linac_data SET data = ? WHERE month = ?", (str(data), month))
-    else:
-        c.execute("INSERT INTO linac_data (month, data) VALUES (?, ?)", (month, str(data)))
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM output_data WHERE month = ?', (month,))
+    cursor.execute('INSERT INTO output_data (month, data) VALUES (?, ?)', (month, data))
     conn.commit()
     conn.close()
-    return jsonify({"status": "success"})
+    return jsonify({'status': 'success'})
 
-# Load data
-@app.route('/load_data', methods=['GET'])
-def load_data():
+@app.route('/data', methods=['GET'])
+def get_data():
     month = request.args.get('month')
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT data FROM linac_data WHERE month = ?", (month,))
-    result = c.fetchone()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT data FROM output_data WHERE month = ?', (month,))
+    row = cursor.fetchone()
     conn.close()
-    if result:
-        return jsonify({"data": eval(result[0])})
-    else:
-        return jsonify({"data": None})
+    return jsonify({'data': eval(row[0]) if row else []})
+
+@app.route('/send-alert', methods=['POST'])
+def send_alert():
+    content = request.get_json()
+    out_values = content.get('outValues', [])
+    if not out_values:
+        return jsonify({'status': 'no alerts sent'})
+
+    message_body = "The following LINAC QA output values are out of tolerance (±2.0%):\n\n"
+    for val in out_values:
+        message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
+
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = RECEIVER_EMAIL
+    msg['Subject'] = '⚠ LINAC QA Output Failed Alert'
+
+    msg.attach(MIMEText(message_body, 'plain'))
+
+    try:
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return jsonify({'status': 'alert sent'})
+    except Exception as e:
+        print("Email sending error:", e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

@@ -4,4 +4,4 @@ pytz
 gunicorn
 pandas
 openpyxl
-pip install boto3
+

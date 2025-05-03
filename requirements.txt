@@ -4,7 +4,4 @@ pytz
 gunicorn
 pandas
 openpyxl
-uplink
-uplink-storj
-flask-cors
 

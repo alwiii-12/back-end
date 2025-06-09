@@ -95,7 +95,7 @@ creds = service_account.Credentials.from_service_account_info(service_account_in
 client = gspread.authorize(creds)
 sheet = client.open("LINAC_QA_Data").worksheet("QA_2025")
 
-# === Save QA data to Google Sheets ===
+# === ✅ UPDATED Save QA data to Google Sheets ===
 @app.route('/save-google-sheets', methods=['POST'])
 def save_data_to_google_sheets():
     try:
@@ -107,24 +107,23 @@ def save_data_to_google_sheets():
         headers = data.get("headers")
         rows = data.get("rows")
 
-        if headers:
-            try:
-                sheet.delete_rows(1)
-            except Exception:
-                pass
-            sheet.insert_row(headers, 1)
+        if not headers or not rows:
+            return jsonify({"error": "Missing headers or rows"}), 400
 
-        if rows:
-            for row in rows:
-                sheet.append_row(row)
-        else:
-            return jsonify({"error": "No rows found"}), 400
+        # ✅ Clear existing sheet data
+        sheet.clear()
 
-        return jsonify({"message": "Data saved to Google Sheets successfully!"}), 200
+        # ✅ Insert headers into row 1
+        sheet.insert_row(headers, 1)
+
+        # ✅ Insert all rows below the header
+        for i, row in enumerate(rows, start=2):  # start=2 means start from second row
+            sheet.insert_row(row, i)
+
+        return jsonify({"message": "Google Sheet updated successfully!"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == '__main__':
     app.run(debug=True)

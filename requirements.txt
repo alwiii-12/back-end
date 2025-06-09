@@ -4,4 +4,7 @@ pytz
 gunicorn
 pandas
 openpyxl
+gspread
+oauth2client
+
 

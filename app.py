@@ -4,6 +4,8 @@ import sqlite3
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 CORS(app)
@@ -29,7 +31,7 @@ def init_db():
 
 init_db()
 
-# === Save QA data ===
+# === Save QA data to SQLite ===
 @app.route('/save', methods=['POST'])
 def save_data():
     content = request.get_json()
@@ -44,7 +46,7 @@ def save_data():
     conn.close()
     return jsonify({'status': 'success'})
 
-# === Load QA data ===
+# === Load QA data from SQLite ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month = request.args.get('month')
@@ -83,6 +85,43 @@ def send_alert():
     except Exception as e:
         print("Email sending error:", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# === Google Sheets setup (global) ===
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("qa-service-account.json", scope)
+client = gspread.authorize(creds)
+sheet = client.open("LINAC_QA_Data").worksheet("QA_2025")
+
+# === Save QA data to Google Sheets ===
+@app.route('/save-google-sheets', methods=['POST'])
+def save_data_to_google_sheets():
+    try:
+        data = request.json  # Expecting JSON with keys: headers (list), rows (list of lists)
+
+        if not data:
+            return jsonify({"error": "No data received"}), 400
+
+        headers = data.get("headers")
+        rows = data.get("rows")
+
+        if headers:
+            try:
+                sheet.delete_rows(1)
+            except Exception:
+                pass
+            sheet.insert_row(headers, 1)
+
+        if rows:
+            for row in rows:
+                sheet.append_row(row)
+        else:
+            return jsonify({"error": "No rows found"}), 400
+
+        return jsonify({"message": "Data saved to Google Sheets successfully!"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True)

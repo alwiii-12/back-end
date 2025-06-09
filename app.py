@@ -5,7 +5,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import os
+import json
+from google.oauth2 import service_account
 
 app = Flask(__name__)
 CORS(app)
@@ -86,9 +88,10 @@ def send_alert():
         print("Email sending error:", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Google Sheets setup (global) ===
+# === Google Sheets setup using secure env var ===
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("qa-service-account.json", scope)
+service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_KEY"])
+creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scope)
 client = gspread.authorize(creds)
 sheet = client.open("LINAC_QA_Data").worksheet("QA_2025")
 

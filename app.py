@@ -88,39 +88,44 @@ def send_alert():
         print("Email sending error:", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Google Sheets setup using secure env var ===
+# === Google Sheets setup ===
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_KEY"])
 creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scope)
 client = gspread.authorize(creds)
-sheet = client.open("LINAC_QA_Data").worksheet("QA_2025")
 
-# === ✅ UPDATED Save QA data to Google Sheets ===
+# === ✅ Save QA data to correct monthly Google Sheet ===
 @app.route('/save-google-sheets', methods=['POST'])
 def save_data_to_google_sheets():
     try:
-        data = request.json  # Expecting JSON with keys: headers (list), rows (list of lists)
+        data = request.json  # Expecting keys: headers, rows, month
 
         if not data:
             return jsonify({"error": "No data received"}), 400
 
         headers = data.get("headers")
         rows = data.get("rows")
+        month = data.get("month")
 
-        if not headers or not rows:
-            return jsonify({"error": "Missing headers or rows"}), 400
+        if not headers or not rows or not month:
+            return jsonify({"error": "Missing headers, rows, or month"}), 400
 
-        # ✅ Clear existing sheet data
+        spreadsheet = client.open("LINAC_QA_Data")
+        sheet_name = f"Month_{month}"
+
+        try:
+            sheet = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="100")
+
+        # Clear and update
         sheet.clear()
-
-        # ✅ Insert headers into row 1
         sheet.insert_row(headers, 1)
 
-        # ✅ Insert all rows below the header
-        for i, row in enumerate(rows, start=2):  # start=2 means start from second row
+        for i, row in enumerate(rows, start=2):
             sheet.insert_row(row, i)
 
-        return jsonify({"message": "Google Sheet updated successfully!"}), 200
+        return jsonify({"message": f"Google Sheet '{sheet_name}' updated successfully!"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

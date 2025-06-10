@@ -88,42 +88,48 @@ def send_alert():
         print("Email sending error:", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Google Sheets setup using secure env var ===
+# === Google Sheets setup ===
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_KEY"])
 creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scope)
 client = gspread.authorize(creds)
-sheet = client.open("LINAC_QA_Data").worksheet("QA_2025")
 
-# === ✅ UPDATED Save QA data to Google Sheets ===
+# === ✅ Save QA data to Monthly Sheet in Google Sheets ===
 @app.route('/save-google-sheets', methods=['POST'])
 def save_data_to_google_sheets():
     try:
-        data = request.json  # Expecting JSON with keys: headers (list), rows (list of lists)
-
-        if not data:
-            return jsonify({"error": "No data received"}), 400
+        data = request.json  # Expecting keys: headers, rows, sheetName
 
         headers = data.get("headers")
         rows = data.get("rows")
+        sheet_name = data.get("sheetName")
 
-        if not headers or not rows:
-            return jsonify({"error": "Missing headers or rows"}), 400
+        if not headers or not rows or not sheet_name:
+            return jsonify({"error": "Missing headers, rows, or sheetName"}), 400
 
-        # ✅ Clear existing sheet data
-        sheet.clear()
+        # Open the spreadsheet
+        spreadsheet = client.open("LINAC_QA_Data")
 
-        # ✅ Insert headers into row 1
-        sheet.insert_row(headers, 1)
+        # Delete existing sheet with same name if it exists
+        try:
+            existing_sheet = spreadsheet.worksheet(sheet_name)
+            spreadsheet.del_worksheet(existing_sheet)
+        except gspread.exceptions.WorksheetNotFound:
+            pass  # Sheet does not exist
 
-        # ✅ Insert all rows below the header
-        for i, row in enumerate(rows, start=2):  # start=2 means start from second row
-            sheet.insert_row(row, i)
+        # Add new worksheet
+        new_sheet = spreadsheet.add_worksheet(title=sheet_name, rows="50", cols=str(len(headers)))
 
-        return jsonify({"message": "Google Sheet updated successfully!"}), 200
+        # Insert headers and data
+        new_sheet.insert_row(headers, 1)
+        for i, row in enumerate(rows, start=2):
+            new_sheet.insert_row(row, i)
+
+        return jsonify({"message": f"Google Sheet '{sheet_name}' updated successfully!"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# === Run the Flask app ===
 if __name__ == '__main__':
     app.run(debug=True)

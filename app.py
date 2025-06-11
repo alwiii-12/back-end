@@ -16,7 +16,7 @@ CORS(app)
 # === Configuration for Email Alerts ===
 SENDER_EMAIL = 'itsmealwin12@gmail.com'
 RECEIVER_EMAIL = 'alwinjose812@gmail.com'
-APP_PASSWORD = 'tjvy ksue rpnk xmaf'
+APP_PASSWORD = 'tjvy ksue rpnk xmaf'  # Use Render Secret for this in production
 
 # === Firebase Firestore Initialization ===
 # Load Firebase credentials from environment variable. Make sure you've set this in Render.
@@ -46,7 +46,6 @@ def save_data():
         return jsonify({'status': 'error', 'message': 'Missing month or data'}), 400
 
     try:
-        # Save data under document with ID equal to the month
         db.collection('linac_data').document(month).set({'data': data})
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -105,6 +104,11 @@ def send_alert():
     except Exception as e:
         print("Email sending error:", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# === Default Route ===
+@app.route('/')
+def index():
+    return "✅ LINAC QA Backend is running."
 
 # === Main Entry Point ===
 if __name__ == '__main__':

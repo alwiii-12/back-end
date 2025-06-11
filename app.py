@@ -6,6 +6,7 @@ from email.mime.multipart import MIMEMultipart
 import os
 import json
 import logging
+from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
@@ -76,12 +77,19 @@ def get_data():
     try:
         doc_ref = db.collection('linac_data').document(month)
         doc = doc_ref.get()
+
         if doc.exists:
             app.logger.info("📤 Data loaded for %s", month)
             return jsonify({'data': doc.to_dict().get('data', [])})
         else:
-            app.logger.info("📁 No data for %s", month)
-            return jsonify({'data': []})
+            # ⛔ No data found, return default structure
+            year, mon = month.split("-")
+            _, num_days = monthrange(int(year), int(mon))
+            energy_types = ["6X", "10X", "6E", "9E", "12E", "15E", "18E", "20E", "25E", "30E"]
+            default_data = [{"energy": e, "values": [""] * num_days} for e in energy_types]
+            app.logger.info("📁 Returning default blank data for %s", month)
+            return jsonify({'data': default_data})
+
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
         return jsonify({'error': str(e)}), 500

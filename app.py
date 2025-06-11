@@ -46,10 +46,19 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
 
         month = content['month']
-        data = content['data']
+        raw_data = content['data']
 
-        # Save under "linac_data" collection with document ID = month
-        db.collection('linac_data').document(month).set({'data': data})
+        # ✅ Convert 2D array into list of dictionaries
+        formatted_data = []
+        for row in raw_data:
+            if not row:
+                continue
+            formatted_data.append({
+                "energy": row[0],
+                "values": row[1:]
+            })
+
+        db.collection('linac_data').document(month).set({'data': formatted_data})
         app.logger.info("✅ Data saved for month: %s", month)
         return jsonify({'status': 'success'}), 200
 

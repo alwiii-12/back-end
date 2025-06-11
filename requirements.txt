@@ -6,5 +6,8 @@ pandas
 openpyxl
 gspread
 oauth2client
+flask
+flask-cors
+firebase-admin
 
 

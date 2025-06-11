@@ -1,67 +1,86 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import sqlite3
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import gspread
 import os
 import json
-from google.oauth2 import service_account
+
+# Firebase Admin SDK
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 app = Flask(__name__)
 CORS(app)
 
-DB_NAME = 'linac_data.db'
+# === Configuration for Email Alerts ===
 SENDER_EMAIL = 'itsmealwin12@gmail.com'
 RECEIVER_EMAIL = 'alwinjose812@gmail.com'
 APP_PASSWORD = 'tjvy ksue rpnk xmaf'
 
-# === Initialize database ===
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS output_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            month TEXT NOT NULL,
-            data TEXT NOT NULL
-        )
-    ''')
-    conn.commit()
-    conn.close()
+# === Firebase Firestore Initialization ===
+# Load Firebase credentials from environment variable. Make sure you've set this in Render.
+firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+if not firebase_json:
+    raise Exception("FIREBASE_CREDENTIALS environment variable not set.")
 
-init_db()
+firebase_dict = json.loads(firebase_json)
+cred = credentials.Certificate(firebase_dict)
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-# === Save QA data to SQLite ===
+# === Endpoint to Save QA Data into Firestore ===
 @app.route('/save', methods=['POST'])
 def save_data():
+    """
+    Expects JSON payload with keys:
+      - "month": string in format "YYYY-MM"
+      - "data": the table data (list of lists)
+    The data is stored in Firestore under collection "linac_data" with document id = month.
+    """
     content = request.get_json()
-    month = content['month']
-    data = str(content['data'])
+    try:
+        month = content['month']
+        data = content['data']
+    except KeyError:
+        return jsonify({'status': 'error', 'message': 'Missing month or data'}), 400
 
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM output_data WHERE month = ?', (month,))
-    cursor.execute('INSERT INTO output_data (month, data) VALUES (?, ?)', (month, data))
-    conn.commit()
-    conn.close()
-    return jsonify({'status': 'success'})
+    try:
+        # Save data under document with ID equal to the month
+        db.collection('linac_data').document(month).set({'data': data})
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Load QA data from SQLite ===
+# === Endpoint to Load QA Data from Firestore ===
 @app.route('/data', methods=['GET'])
 def get_data():
+    """
+    Expects query parameter "month" (format "YYYY-MM").
+    Returns the stored data from Firestore or an empty list if not found.
+    """
     month = request.args.get('month')
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT data FROM output_data WHERE month = ?', (month,))
-    row = cursor.fetchone()
-    conn.close()
-    return jsonify({'data': eval(row[0]) if row else []})
+    if not month:
+        return jsonify({'error': 'Missing month parameter'}), 400
 
-# === Email alert for failed values ===
+    try:
+        doc_ref = db.collection('linac_data').document(month)
+        doc = doc_ref.get()
+        if doc.exists:
+            return jsonify({'data': doc.to_dict().get('data', [])})
+        else:
+            return jsonify({'data': []})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# === Endpoint to Send Email Alerts for Out-of-Tolerance Values ===
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
+    """
+    Expects JSON payload with key:
+      - "outValues": list of objects { energy, date, value }
+    Sends an email alert to the designated receiver.
+    """
     content = request.get_json()
     out_values = content.get('outValues', [])
     if not out_values:
@@ -75,7 +94,6 @@ def send_alert():
     msg['From'] = SENDER_EMAIL
     msg['To'] = RECEIVER_EMAIL
     msg['Subject'] = '⚠ LINAC QA Output Failed Alert'
-
     msg.attach(MIMEText(message_body, 'plain'))
 
     try:
@@ -88,47 +106,6 @@ def send_alert():
         print("Email sending error:", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Google Sheets setup ===
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_KEY"])
-creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scope)
-client = gspread.authorize(creds)
-
-# === ✅ Save QA data to correct monthly Google Sheet ===
-@app.route('/save-google-sheets', methods=['POST'])
-def save_data_to_google_sheets():
-    try:
-        data = request.json  # Expecting keys: headers, rows, month
-
-        if not data:
-            return jsonify({"error": "No data received"}), 400
-
-        headers = data.get("headers")
-        rows = data.get("rows")
-        month = data.get("month")
-
-        if not headers or not rows or not month:
-            return jsonify({"error": "Missing headers, rows, or month"}), 400
-
-        spreadsheet = client.open("LINAC_QA_Data")
-        sheet_name = f"Month_{month}"
-
-        try:
-            sheet = spreadsheet.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="100")
-
-        # Clear and update
-        sheet.clear()
-        sheet.insert_row(headers, 1)
-
-        for i, row in enumerate(rows, start=2):
-            sheet.insert_row(row, i)
-
-        return jsonify({"message": f"Google Sheet '{sheet_name}' updated successfully!"}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+# === Main Entry Point ===
 if __name__ == '__main__':
     app.run(debug=True)

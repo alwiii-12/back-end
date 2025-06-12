@@ -36,7 +36,7 @@ except Exception as e:
     app.logger.error("🔥 Firebase init failed: %s", str(e))
     raise
 
-# === Endpoint to Save QA Data into Firestore ===
+# === Endpoint to Save QA Data ===
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -46,10 +46,9 @@ def save_data():
         if 'month' not in content or 'data' not in content:
             return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
 
-        month = content['month']
+        month = f"Month_{content['month']}"
         raw_data = content['data']
 
-        # ✅ Convert 2D array into list of dictionaries
         formatted_data = []
         for row in raw_data:
             if not row:
@@ -59,7 +58,7 @@ def save_data():
                 "values": row[1:]
             })
 
-        db.collection('linac_data').document(month).set({'data': formatted_data})
+        db.collection('linac_data').document(month).set({'data': formatted_data}, merge=True)
         app.logger.info("✅ Data saved for month: %s", month)
         return jsonify({'status': 'success'}), 200
 
@@ -67,34 +66,57 @@ def save_data():
         app.logger.error("❌ Save failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Endpoint to Load QA Data from Firestore ===
+# === Endpoint to Load QA Data ===
 @app.route('/data', methods=['GET'])
 def get_data():
-    month = request.args.get('month')
-    if not month:
+    month_param = request.args.get('month')
+    if not month_param:
         return jsonify({'error': 'Missing month parameter'}), 400
 
+    doc_id = f"Month_{month_param}"
     try:
-        doc_ref = db.collection('linac_data').document(month)
+        doc_ref = db.collection('linac_data').document(doc_id)
         doc = doc_ref.get()
 
         if doc.exists:
-            app.logger.info("📤 Data loaded for %s", month)
-            return jsonify({'data': doc.to_dict().get('data', [])})
+            data = doc.to_dict()
+            app.logger.info("📤 Data loaded for %s", doc_id)
+            return jsonify({
+                'data': data.get('data', []),
+                'locked': data.get('locked', False)
+            })
         else:
-            # ⛔ No data found, return default structure
-            year, mon = month.split("-")
+            # No data found, return default
+            year, mon = month_param.split("-")
             _, num_days = monthrange(int(year), int(mon))
             energy_types = ["6X", "10X", "6E", "9E", "12E", "15E", "18E", "20E", "25E", "30E"]
             default_data = [{"energy": e, "values": [""] * num_days} for e in energy_types]
-            app.logger.info("📁 Returning default blank data for %s", month)
-            return jsonify({'data': default_data})
+            app.logger.info("📁 Returning blank data for %s", doc_id)
+            return jsonify({'data': default_data, 'locked': False})
 
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-# === Endpoint to Send Email Alerts for Out-of-Tolerance Values ===
+# === Endpoint to Lock/Unlock Monthly Data ===
+@app.route('/lock', methods=['POST'])
+def lock_data():
+    try:
+        content = request.get_json(force=True)
+        if 'month' not in content or 'locked' not in content:
+            return jsonify({'status': 'error', 'message': 'Missing "month" or "locked"'}), 400
+
+        month = f"Month_{content['month']}"
+        locked = content['locked']
+        db.collection('linac_data').document(month).set({'locked': locked}, merge=True)
+        app.logger.info("🔒 Lock status updated for %s: %s", month, locked)
+        return jsonify({'status': 'success'}), 200
+
+    except Exception as e:
+        app.logger.error("❌ Lock update failed: %s", str(e), exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# === Endpoint to Send Out-of-Tolerance Alert ===
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
     try:

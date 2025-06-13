@@ -36,7 +36,10 @@ except Exception as e:
     app.logger.error("🔥 Firebase init failed: %s", str(e))
     raise
 
-# === Endpoint to Save QA Data ===
+# === Constant Energy Rows ===
+ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
+
+# === Endpoint to Save QA Data (2D array) ===
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -47,18 +50,12 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
 
         month = f"Month_{content['month']}"
-        raw_data = content['data']
+        raw_data = content['data']  # ← 2D array expected
 
-        formatted_data = []
-        for row in raw_data:
-            if not row:
-                continue
-            formatted_data.append({
-                "energy": row[0],
-                "values": row[1:]
-            })
+        if not isinstance(raw_data, list):
+            return jsonify({'status': 'error', 'message': 'Data must be a 2D array'}), 400
 
-        db.collection('linac_data').document(month).set({'data': formatted_data}, merge=True)
+        db.collection('linac_data').document(month).set({'data': raw_data}, merge=True)
         app.logger.info("✅ Data saved for month: %s", month)
         return jsonify({'status': 'success'}), 200
 
@@ -66,7 +63,7 @@ def save_data():
         app.logger.error("❌ Save failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Endpoint to Load QA Data ===
+# === Endpoint to Load QA Data (return as 2D array) ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
@@ -75,24 +72,21 @@ def get_data():
 
     doc_id = f"Month_{month_param}"
     try:
-        doc_ref = db.collection('linac_data').document(doc_id)
-        doc = doc_ref.get()
-
+        doc = db.collection('linac_data').document(doc_id).get()
         if doc.exists:
             data = doc.to_dict()
-            app.logger.info("📤 Data loaded for %s", doc_id)
-            return jsonify({
-                'data': data.get('data', []),
-                'locked': data.get('locked', False)
-            })
-        else:
-            # No data found, return default
-            year, mon = month_param.split("-")
-            _, num_days = monthrange(int(year), int(mon))
-            energy_types = ["6X", "10X", "6E", "9E", "12E", "15E", "18E", "20E", "25E", "30E"]
-            default_data = [{"energy": e, "values": [""] * num_days} for e in energy_types]
-            app.logger.info("📁 Returning blank data for %s", doc_id)
-            return jsonify({'data': default_data, 'locked': False})
+            table = data.get('data', [])
+            locked = data.get('locked', False)
+
+            if isinstance(table, list) and all(isinstance(row, list) for row in table):
+                return jsonify({'data': table, 'locked': locked})
+
+        # Return default 2D array with empty cells
+        year, mon = month_param.split("-")
+        _, num_days = monthrange(int(year), int(mon))
+        default_data = [[energy] + [""] * num_days for energy in ENERGY_TYPES]
+        app.logger.info("📁 Returning blank 2D data for %s", doc_id)
+        return jsonify({'data': default_data, 'locked': False})
 
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
@@ -116,7 +110,7 @@ def lock_data():
         app.logger.error("❌ Lock update failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Endpoint to Send Out-of-Tolerance Alert ===
+# === Endpoint to Send Out-of-Tolerance Alerts ===
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
     try:

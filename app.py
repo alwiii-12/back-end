@@ -19,7 +19,7 @@ app.logger.setLevel(logging.DEBUG)
 # === Email Config ===
 SENDER_EMAIL = 'itsmealwin12@gmail.com'
 RECEIVER_EMAIL = 'alwinjose812@gmail.com'
-APP_PASSWORD = 'tjvy ksue rpnk xmaf'  # 🔐 Use environment variables in production!
+APP_PASSWORD = 'tjvy ksue rpnk xmaf'
 
 # === Firebase Init ===
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -46,11 +46,11 @@ def signup():
         user = request.get_json(force=True)
         app.logger.info("🆕 Signup request: %s", user)
 
-        required_fields = ['name', 'email', 'password', 'hospital', 'role']
+        required_fields = ['name', 'email', 'password', 'hospital', 'role', 'uid']
         if not all(field in user for field in required_fields):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
-        user_ref = db.collection('users').document(user['email'])
+        user_ref = db.collection('users').document(user['uid'])
         if user_ref.get().exists:
             return jsonify({'status': 'error', 'message': 'User already exists'}), 409
 
@@ -85,6 +85,7 @@ def login():
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
 
         user_data = user_doc.to_dict()
+        uid = user_doc.id
 
         if user_data["password"] != password:
             return jsonify({'status': 'error', 'message': 'Incorrect password'}), 401
@@ -93,25 +94,26 @@ def login():
             'status': 'success',
             'message': 'Login successful',
             'hospital': user_data.get("hospital", ""),
-            'role': user_data.get("role", "")
+            'role': user_data.get("role", ""),
+            'uid': uid
         }), 200
 
     except Exception as e:
         app.logger.error("❌ Login error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': 'Login failed'}), 500
 
-# === Save QA Data ===
+# === Save QA Data (UID-based) ===
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
         content = request.get_json(force=True)
         app.logger.info("📥 Save request: %s", content)
 
-        if 'month' not in content or 'data' not in content or 'hospital' not in content:
-            return jsonify({'status': 'error', 'message': 'Missing "month", "hospital", or "data"'}), 400
+        if 'month' not in content or 'data' not in content or 'uid' not in content:
+            return jsonify({'status': 'error', 'message': 'Missing "month", "uid", or "data"'}), 400
 
+        uid = content['uid']
         month = f"Month_{content['month']}"
-        hospital = content['hospital']
         raw_data = content['data']
 
         if not isinstance(raw_data, list):
@@ -126,24 +128,24 @@ def save_data():
                     'values': row[1:]
                 })
 
-        db.collection('linac_data').document(hospital).collection('months').document(month).set(
+        db.collection('linac_data').document(uid).collection('months').document(month).set(
             {'data': converted_data}, merge=True)
 
-        app.logger.info("✅ Data saved for %s/%s", hospital, month)
+        app.logger.info("✅ Data saved for %s/%s", uid, month)
         return jsonify({'status': 'success'}), 200
 
     except Exception as e:
         app.logger.error("❌ Save failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Load QA Data ===
+# === Load QA Data (UID-based) ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
-    hospital_param = request.args.get('hospital')
+    uid = request.args.get('uid')
 
-    if not month_param or not hospital_param:
-        return jsonify({'error': 'Missing "month" or "hospital" parameter'}), 400
+    if not month_param or not uid:
+        return jsonify({'error': 'Missing "month" or "uid" parameter'}), 400
 
     doc_id = f"Month_{month_param}"
     try:
@@ -152,7 +154,7 @@ def get_data():
 
         energy_dict = {energy: [""] * num_days for energy in ENERGY_TYPES}
 
-        doc = db.collection('linac_data').document(hospital_param).collection('months').document(doc_id).get()
+        doc = db.collection('linac_data').document(uid).collection('months').document(doc_id).get()
         if doc.exists:
             data = doc.to_dict()
             for row in data.get('data', []):

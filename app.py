@@ -57,7 +57,7 @@ def signup():
         user_ref.set({
             'name': user['name'],
             'email': user['email'],
-            'password': user['password'],  # ❗ In production, hash this!
+            'password': user['password'],
             'hospital': user['hospital'],
             'role': user['role']
         })
@@ -107,10 +107,11 @@ def save_data():
         content = request.get_json(force=True)
         app.logger.info("📥 Save request: %s", content)
 
-        if 'month' not in content or 'data' not in content:
-            return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
+        if 'month' not in content or 'data' not in content or 'hospital' not in content:
+            return jsonify({'status': 'error', 'message': 'Missing "month", "hospital", or "data"'}), 400
 
         month = f"Month_{content['month']}"
+        hospital = content['hospital']
         raw_data = content['data']
 
         if not isinstance(raw_data, list):
@@ -125,8 +126,10 @@ def save_data():
                     'values': row[1:]
                 })
 
-        db.collection('linac_data').document(month).set({'data': converted_data}, merge=True)
-        app.logger.info("✅ Data saved for month: %s", month)
+        db.collection('linac_data').document(hospital).collection('months').document(month).set(
+            {'data': converted_data}, merge=True)
+
+        app.logger.info("✅ Data saved for %s/%s", hospital, month)
         return jsonify({'status': 'success'}), 200
 
     except Exception as e:
@@ -137,8 +140,10 @@ def save_data():
 @app.route('/data', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
-    if not month_param:
-        return jsonify({'error': 'Missing month parameter'}), 400
+    hospital_param = request.args.get('hospital')
+
+    if not month_param or not hospital_param:
+        return jsonify({'error': 'Missing "month" or "hospital" parameter'}), 400
 
     doc_id = f"Month_{month_param}"
     try:
@@ -147,7 +152,7 @@ def get_data():
 
         energy_dict = {energy: [""] * num_days for energy in ENERGY_TYPES}
 
-        doc = db.collection('linac_data').document(doc_id).get()
+        doc = db.collection('linac_data').document(hospital_param).collection('months').document(doc_id).get()
         if doc.exists:
             data = doc.to_dict()
             for row in data.get('data', []):

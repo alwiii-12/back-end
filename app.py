@@ -19,7 +19,7 @@ app.logger.setLevel(logging.DEBUG)
 # === Email Config ===
 SENDER_EMAIL = 'itsmealwin12@gmail.com'
 RECEIVER_EMAIL = 'alwinjose812@gmail.com'
-APP_PASSWORD = 'tjvy ksue rpnk xmaf'
+APP_PASSWORD = 'tjvy ksue rpnk xmaf'  # Use environment var in production
 
 # === Firebase Init ===
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -36,10 +36,10 @@ except Exception as e:
     app.logger.error("🔥 Firebase init failed: %s", str(e))
     raise
 
-# === Energy Types ===
+# === Constant Energy Rows ===
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
-# === Save Data ===
+# === Save QA Data ===
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -50,12 +50,22 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
 
         month = f"Month_{content['month']}"
-        raw_data = content['data']
+        raw_data = content['data']  # ← 2D array expected
 
         if not isinstance(raw_data, list):
             return jsonify({'status': 'error', 'message': 'Data must be a 2D array'}), 400
 
-        db.collection('linac_data').document(month).set({'data': raw_data}, merge=True)
+        # Convert 2D array into Firestore-safe format
+        converted_data = []
+        for i, row in enumerate(raw_data):
+            if len(row) > 1:
+                converted_data.append({
+                    'row': i,
+                    'energy': row[0],
+                    'values': row[1:]
+                })
+
+        db.collection('linac_data').document(month).set({'data': converted_data}, merge=True)
         app.logger.info("✅ Data saved for month: %s", month)
         return jsonify({'status': 'success'}), 200
 
@@ -63,7 +73,7 @@ def save_data():
         app.logger.error("❌ Save failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Load Data ===
+# === Load QA Data ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
@@ -72,29 +82,20 @@ def get_data():
 
     doc_id = f"Month_{month_param}"
     try:
-        year, mon = month_param.split("-")
-        _, num_days = monthrange(int(year), int(mon))
-        expected_cols = num_days + 1
-
-        # Try to load saved data
         doc = db.collection('linac_data').document(doc_id).get()
         if doc.exists:
-            raw_data = doc.to_dict().get('data', [])
-            cleaned_data = []
+            data = doc.to_dict()
+            table = []
+            for row in data.get('data', []):
+                energy = row.get('energy', '')
+                values = row.get('values', [])
+                table.append([energy] + values)
 
-            for i, energy in enumerate(ENERGY_TYPES):
-                if i < len(raw_data) and isinstance(raw_data[i], list):
-                    row = raw_data[i][:expected_cols] + [""] * (expected_cols - len(raw_data[i]))
-                    if not row[0] or row[0] not in ENERGY_TYPES:
-                        row[0] = energy
-                else:
-                    row = [energy] + [""] * num_days
-                cleaned_data.append(row)
+            return jsonify({'data': table})
 
-            app.logger.info("📤 Loaded saved data for %s", doc_id)
-            return jsonify({'data': cleaned_data})
-
-        # No data, return blank
+        # If not exists, return blank
+        year, mon = month_param.split("-")
+        _, num_days = monthrange(int(year), int(mon))
         default_data = [[energy] + [""] * num_days for energy in ENERGY_TYPES]
         app.logger.info("📁 Returning blank 2D data for %s", doc_id)
         return jsonify({'data': default_data})
@@ -103,7 +104,7 @@ def get_data():
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-# === Alert Email ===
+# === Send Alert Email ===
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
     try:
@@ -135,10 +136,11 @@ def send_alert():
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Default Root ===
+# === Root Check ===
 @app.route('/')
 def index():
     return "✅ LINAC QA Backend is running."
 
+# === Main Entry ===
 if __name__ == '__main__':
     app.run(debug=True)

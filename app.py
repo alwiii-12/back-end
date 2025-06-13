@@ -19,7 +19,7 @@ app.logger.setLevel(logging.DEBUG)
 # === Email Config ===
 SENDER_EMAIL = 'itsmealwin12@gmail.com'
 RECEIVER_EMAIL = 'alwinjose812@gmail.com'
-APP_PASSWORD = 'tjvy ksue rpnk xmaf'  # Use environment var in production
+APP_PASSWORD = 'tjvy ksue rpnk xmaf'  # 🔐 Use environment variables in production!
 
 # === Firebase Init ===
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -39,7 +39,7 @@ except Exception as e:
 # === Constant Energy Rows ===
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
-# === Sign Up User ===
+# === Sign Up Route ===
 @app.route('/signup', methods=['POST'])
 def signup():
     try:
@@ -57,7 +57,7 @@ def signup():
         user_ref.set({
             'name': user['name'],
             'email': user['email'],
-            'password': user['password'],  # In production, hash this!
+            'password': user['password'],  # ❗ In production, hash this!
             'hospital': user['hospital'],
             'role': user['role']
         })
@@ -67,7 +67,7 @@ def signup():
         app.logger.error("❌ Signup failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Login User ===
+# === Login Route ===
 @app.route('/login', methods=['POST'])
 def login():
     try:
@@ -78,7 +78,6 @@ def login():
         if not email or not password:
             return jsonify({'status': 'error', 'message': 'Email and password are required'}), 400
 
-        # Search user by email
         users = db.collection("users").where("email", "==", email).limit(1).stream()
         user_doc = next(users, None)
 
@@ -146,7 +145,6 @@ def get_data():
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
 
-        # Default empty rows
         energy_dict = {energy: [""] * num_days for energy in ENERGY_TYPES}
 
         doc = db.collection('linac_data').document(doc_id).get()
@@ -158,7 +156,6 @@ def get_data():
                 if energy in energy_dict:
                     energy_dict[energy] = values
 
-        # Reconstruct 2D array in ENERGY_TYPES order
         table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
         return jsonify({'data': table})
 
@@ -198,7 +195,7 @@ def send_alert():
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Root Check ===
+# === Root Endpoint ===
 @app.route('/')
 def index():
     return "✅ LINAC QA Backend is running."

@@ -50,12 +50,11 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
 
         month = f"Month_{content['month']}"
-        raw_data = content['data']  # ← 2D array expected
+        raw_data = content['data']
 
         if not isinstance(raw_data, list):
             return jsonify({'status': 'error', 'message': 'Data must be a 2D array'}), 400
 
-        # Convert 2D array into Firestore-safe format
         converted_data = []
         for i, row in enumerate(raw_data):
             if len(row) > 1:
@@ -82,23 +81,24 @@ def get_data():
 
     doc_id = f"Month_{month_param}"
     try:
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+
+        # Default empty rows
+        energy_dict = {energy: [""] * num_days for energy in ENERGY_TYPES}
+
         doc = db.collection('linac_data').document(doc_id).get()
         if doc.exists:
             data = doc.to_dict()
-            table = []
             for row in data.get('data', []):
                 energy = row.get('energy', '')
                 values = row.get('values', [])
-                table.append([energy] + values)
+                if energy in energy_dict:
+                    energy_dict[energy] = values
 
-            return jsonify({'data': table})
-
-        # If not exists, return blank
-        year, mon = month_param.split("-")
-        _, num_days = monthrange(int(year), int(mon))
-        default_data = [[energy] + [""] * num_days for energy in ENERGY_TYPES]
-        app.logger.info("📁 Returning blank 2D data for %s", doc_id)
-        return jsonify({'data': default_data})
+        # Reconstruct 2D array in ENERGY_TYPES order
+        table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
+        return jsonify({'data': table})
 
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)

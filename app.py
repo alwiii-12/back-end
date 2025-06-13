@@ -47,7 +47,7 @@ def signup():
         app.logger.info("🆕 Signup request: %s", user)
 
         required_fields = ['name', 'email', 'password', 'hospital', 'role', 'uid']
-        if not all(field in user for field in required_fields):
+        if not all(user.get(field) for field in required_fields):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
         user_ref = db.collection('users').document(user['uid'])

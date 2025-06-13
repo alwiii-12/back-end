@@ -16,12 +16,12 @@ app = Flask(__name__)
 CORS(app)
 app.logger.setLevel(logging.DEBUG)
 
-# === Configuration for Email Alerts ===
+# === Email Config ===
 SENDER_EMAIL = 'itsmealwin12@gmail.com'
 RECEIVER_EMAIL = 'alwinjose812@gmail.com'
-APP_PASSWORD = 'tjvy ksue rpnk xmaf'  # Use Render Secret in production
+APP_PASSWORD = 'tjvy ksue rpnk xmaf'
 
-# === Firebase Firestore Initialization ===
+# === Firebase Init ===
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
 if not firebase_json:
     raise Exception("FIREBASE_CREDENTIALS environment variable not set.")
@@ -36,10 +36,10 @@ except Exception as e:
     app.logger.error("🔥 Firebase init failed: %s", str(e))
     raise
 
-# === Constant Energy Rows ===
+# === Energy Types ===
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
-# === Endpoint to Save QA Data (2D array) ===
+# === Save Data ===
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -50,7 +50,7 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
 
         month = f"Month_{content['month']}"
-        raw_data = content['data']  # ← 2D array expected
+        raw_data = content['data']
 
         if not isinstance(raw_data, list):
             return jsonify({'status': 'error', 'message': 'Data must be a 2D array'}), 400
@@ -63,7 +63,7 @@ def save_data():
         app.logger.error("❌ Save failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Endpoint to Load QA Data (return as 2D array) ===
+# === Load Data ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
@@ -72,23 +72,29 @@ def get_data():
 
     doc_id = f"Month_{month_param}"
     try:
-        doc = db.collection('linac_data').document(doc_id).get()
-        if doc.exists:
-            data = doc.to_dict()
-            table = data.get('data', [])
-
-            # ✅ Convert all None to ""
-            cleaned_table = []
-            for row in table:
-                cleaned_row = [cell if cell is not None else "" for cell in row]
-                cleaned_table.append(cleaned_row)
-
-            if isinstance(cleaned_table, list) and all(isinstance(row, list) for row in cleaned_table):
-                return jsonify({'data': cleaned_table})
-
-        # Return default 2D array with empty cells
         year, mon = month_param.split("-")
         _, num_days = monthrange(int(year), int(mon))
+        expected_cols = num_days + 1
+
+        # Try to load saved data
+        doc = db.collection('linac_data').document(doc_id).get()
+        if doc.exists:
+            raw_data = doc.to_dict().get('data', [])
+            cleaned_data = []
+
+            for i, energy in enumerate(ENERGY_TYPES):
+                if i < len(raw_data) and isinstance(raw_data[i], list):
+                    row = raw_data[i][:expected_cols] + [""] * (expected_cols - len(raw_data[i]))
+                    if not row[0] or row[0] not in ENERGY_TYPES:
+                        row[0] = energy
+                else:
+                    row = [energy] + [""] * num_days
+                cleaned_data.append(row)
+
+            app.logger.info("📤 Loaded saved data for %s", doc_id)
+            return jsonify({'data': cleaned_data})
+
+        # No data, return blank
         default_data = [[energy] + [""] * num_days for energy in ENERGY_TYPES]
         app.logger.info("📁 Returning blank 2D data for %s", doc_id)
         return jsonify({'data': default_data})
@@ -97,7 +103,7 @@ def get_data():
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-# === Endpoint to Send Out-of-Tolerance Alerts ===
+# === Alert Email ===
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
     try:
@@ -129,11 +135,10 @@ def send_alert():
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Default Route ===
+# === Default Root ===
 @app.route('/')
 def index():
     return "✅ LINAC QA Backend is running."
 
-# === Main Entry Point ===
 if __name__ == '__main__':
     app.run(debug=True)

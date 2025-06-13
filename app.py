@@ -39,7 +39,7 @@ except Exception as e:
 # === Constant Energy Rows ===
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
-# === Endpoint to Save QA Data (2D array) ===
+# === Endpoint to Save QA Data (2D array from frontend) ===
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -50,12 +50,20 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'Missing "month" or "data"'}), 400
 
         month = f"Month_{content['month']}"
-        raw_data = content['data']  # ← 2D array expected
+        raw_data = content['data']
 
-        if not isinstance(raw_data, list):
-            return jsonify({'status': 'error', 'message': 'Data must be a 2D array'}), 400
+        formatted_data = []
+        for row in raw_data:
+            if not row or len(row) < 2:
+                continue
+            energy = str(row[0]).strip()
+            values = [str(v).strip() for v in row[1:]]
+            formatted_data.append({
+                "energy": energy,
+                "values": values
+            })
 
-        db.collection('linac_data').document(month).set({'data': raw_data}, merge=True)
+        db.collection('linac_data').document(month).set({'data': formatted_data}, merge=True)
         app.logger.info("✅ Data saved for month: %s", month)
         return jsonify({'status': 'success'}), 200
 
@@ -63,7 +71,7 @@ def save_data():
         app.logger.error("❌ Save failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Endpoint to Load QA Data (return as 2D array) ===
+# === Endpoint to Load QA Data (converted back to 2D array) ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
@@ -75,13 +83,18 @@ def get_data():
         doc = db.collection('linac_data').document(doc_id).get()
         if doc.exists:
             data = doc.to_dict()
-            table = data.get('data', [])
+            structured = data.get('data', [])
             locked = data.get('locked', False)
 
-            if isinstance(table, list) and all(isinstance(row, list) for row in table):
+            # Convert from list of dicts to 2D array
+            if isinstance(structured, list) and all(isinstance(row, dict) for row in structured):
+                table = []
+                for entry in structured:
+                    row = [entry.get('energy', '')] + entry.get('values', [])
+                    table.append(row)
                 return jsonify({'data': table, 'locked': locked})
 
-        # Return default 2D array with empty cells
+        # Return default 2D array if not found
         year, mon = month_param.split("-")
         _, num_days = monthrange(int(year), int(mon))
         default_data = [[energy] + [""] * num_days for energy in ENERGY_TYPES]

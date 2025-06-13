@@ -39,6 +39,34 @@ except Exception as e:
 # === Constant Energy Rows ===
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
+# === Sign Up User ===
+@app.route('/signup', methods=['POST'])
+def signup():
+    try:
+        user = request.get_json(force=True)
+        app.logger.info("🆕 Signup request: %s", user)
+
+        required_fields = ['name', 'email', 'password', 'hospital', 'role']
+        if not all(field in user for field in required_fields):
+            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+
+        user_ref = db.collection('users').document(user['email'])
+        if user_ref.get().exists:
+            return jsonify({'status': 'error', 'message': 'User already exists'}), 409
+
+        user_ref.set({
+            'name': user['name'],
+            'email': user['email'],
+            'password': user['password'],  # In production, hash this!
+            'hospital': user['hospital'],
+            'role': user['role']
+        })
+
+        return jsonify({'status': 'success', 'message': 'User registered successfully'}), 200
+    except Exception as e:
+        app.logger.error("❌ Signup failed: %s", str(e), exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 # === Save QA Data ===
 @app.route('/save', methods=['POST'])
 def save_data():

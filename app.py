@@ -67,6 +67,40 @@ def signup():
         app.logger.error("❌ Signup failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# === Login User ===
+@app.route('/login', methods=['POST'])
+def login():
+    try:
+        content = request.get_json(force=True)
+        email = content.get("email", "").strip().lower()
+        password = content.get("password", "").strip()
+
+        if not email or not password:
+            return jsonify({'status': 'error', 'message': 'Email and password are required'}), 400
+
+        # Search user by email
+        users = db.collection("users").where("email", "==", email).limit(1).stream()
+        user_doc = next(users, None)
+
+        if user_doc is None:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+
+        user_data = user_doc.to_dict()
+
+        if user_data["password"] != password:
+            return jsonify({'status': 'error', 'message': 'Incorrect password'}), 401
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Login successful',
+            'hospital': user_data.get("hospital", ""),
+            'role': user_data.get("role", "")
+        }), 200
+
+    except Exception as e:
+        app.logger.error("❌ Login error: %s", str(e), exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Login failed'}), 500
+
 # === Save QA Data ===
 @app.route('/save', methods=['POST'])
 def save_data():

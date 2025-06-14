@@ -39,16 +39,17 @@ except Exception as e:
 # === Constant Energy Rows ===
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
-# === Sign Up Route ===
+# === Signup ===
 @app.route('/signup', methods=['POST'])
 def signup():
     try:
         user = request.get_json(force=True)
         app.logger.info("🆕 Signup request: %s", user)
 
-        required_fields = ['name', 'email', 'password', 'hospital', 'role', 'uid']
-        if not all(user.get(field) for field in required_fields):
-            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+        required = ['name', 'email', 'password', 'hospital', 'role', 'uid']
+        missing = [f for f in required if f not in user or user[f] == ""]
+        if missing:
+            return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
 
         user_ref = db.collection('users').document(user['uid'])
         if user_ref.get().exists:
@@ -56,7 +57,7 @@ def signup():
 
         user_ref.set({
             'name': user['name'],
-            'email': user['email'],
+            'email': user['email'].strip().lower(),
             'password': user['password'],
             'hospital': user['hospital'],
             'role': user['role']
@@ -67,7 +68,7 @@ def signup():
         app.logger.error("❌ Signup failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Login Route ===
+# === Login ===
 @app.route('/login', methods=['POST'])
 def login():
     try:
@@ -102,7 +103,7 @@ def login():
         app.logger.error("❌ Login error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': 'Login failed'}), 500
 
-# === Save QA Data (UID-based) ===
+# === Save Monthly QA Data ===
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -138,7 +139,7 @@ def save_data():
         app.logger.error("❌ Save failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Load QA Data (UID-based) ===
+# === Load Monthly QA Data ===
 @app.route('/data', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
@@ -202,11 +203,9 @@ def send_alert():
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Root Endpoint ===
 @app.route('/')
 def index():
-    return "✅ LINAC QA Backend is running."
+    return "✅ LINAC QA Backend Running"
 
-# === Main Entry ===
 if __name__ == '__main__':
     app.run(debug=True)

@@ -68,28 +68,23 @@ def signup():
         app.logger.error("❌ Signup failed: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === Login ===
+# === Login (UID-Based) ===
 @app.route('/login', methods=['POST'])
 def login():
     try:
         content = request.get_json(force=True)
-        email = content.get("email", "").strip().lower()
-        password = content.get("password", "").strip()
+        uid = content.get("uid", "").strip()
 
-        if not email or not password:
-            return jsonify({'status': 'error', 'message': 'Email and password are required'}), 400
+        if not uid:
+            return jsonify({'status': 'error', 'message': 'Missing UID'}), 400
 
-        users = db.collection("users").where("email", "==", email).limit(1).stream()
-        user_doc = next(users, None)
+        user_ref = db.collection("users").document(uid)
+        user_doc = user_ref.get()
 
-        if user_doc is None:
+        if not user_doc.exists:
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
 
         user_data = user_doc.to_dict()
-        uid = user_doc.id
-
-        if user_data["password"] != password:
-            return jsonify({'status': 'error', 'message': 'Incorrect password'}), 401
 
         return jsonify({
             'status': 'success',

@@ -36,7 +36,6 @@ except Exception as e:
     app.logger.error("🔥 Firebase init failed: %s", str(e))
     raise
 
-# === Constant Energy Rows ===
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
 # === Signup ===
@@ -46,8 +45,8 @@ def signup():
         user = request.get_json(force=True)
         app.logger.info("🆕 Signup request: %s", user)
 
-        required = ['name', 'email', 'password', 'hospital', 'role', 'uid']
-        missing = [f for f in required if f not in user or user[f] == ""]
+        required = ['name', 'email', 'hospital', 'role', 'uid']
+        missing = [f for f in required if f not in user or user[f].strip() == ""]
         if missing:
             return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
 
@@ -58,7 +57,6 @@ def signup():
         user_ref.set({
             'name': user['name'],
             'email': user['email'].strip().lower(),
-            'password': user['password'],
             'hospital': user['hospital'],
             'role': user['role']
         })

@@ -1,13 +1,4 @@
 flask
 flask-cors
-pytz
 gunicorn
-pandas
-openpyxl
-gspread
-oauth2client
-flask
-flask-cors
 firebase-admin
-
-

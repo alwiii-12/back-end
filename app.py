@@ -17,9 +17,13 @@ CORS(app)
 app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
-SENDER_EMAIL = 'itsmealwin12@gmail.com'
-RECEIVER_EMAIL = 'alwinjose812@gmail.com'
-APP_PASSWORD = 'tjvy ksue rpnk xmaf'
+SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
+APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD') # Read from environment variable
+if not APP_PASSWORD:
+    app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
+    # You might want to add a more robust error handling here, e.g., exit or disable email functionality
+
 
 # === Firebase Init ===
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -184,13 +188,18 @@ def send_alert():
         msg['Subject'] = '⚠ LINAC QA Output Failed Alert'
         msg.attach(MIMEText(message_body, 'plain'))
 
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(SENDER_EMAIL, APP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
+        # Only attempt to send email if APP_PASSWORD is set
+        if APP_PASSWORD:
+            server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+            server.login(SENDER_EMAIL, APP_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+            app.logger.info("📧 Alert email sent successfully.")
+            return jsonify({'status': 'alert sent'})
+        else:
+            app.logger.warning("🚫 Email not sent: APP_PASSWORD not configured.")
+            return jsonify({'status': 'email not sent', 'message': 'APP_PASSWORD not configured'}), 500
 
-        app.logger.info("📧 Alert email sent successfully.")
-        return jsonify({'status': 'alert sent'})
 
     except Exception as e:
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)

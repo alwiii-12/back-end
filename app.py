@@ -11,6 +11,7 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore
+from firebase_admin import auth # Added for programmatic user deletion (if needed in future)
 
 app = Flask(__name__)
 CORS(app)
@@ -174,21 +175,23 @@ def send_alert():
     try:
         content = request.get_json(force=True)
         out_values = content.get('outValues', [])
+        hospital_name = content.get('hospitalName', 'Unknown Hospital') # Get hospitalName from frontend
 
         if not out_values:
             return jsonify({'status': 'no alerts sent'})
 
-        message_body = "The following LINAC QA output values are out of tolerance (±2.0%):\n\n"
+        # Include hospital name in the email body and subject
+        message_body = f"Alert from Hospital: {hospital_name}\n\n"
+        message_body += "The following LINAC QA output values are out of tolerance (±2.0%):\n\n"
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
-        msg['Subject'] = '⚠ LINAC QA Output Failed Alert'
+        msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}' # Add hospital name to subject
         msg.attach(MIMEText(message_body, 'plain'))
 
-        # Only attempt to send email if APP_PASSWORD is set
         if APP_PASSWORD:
             server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
             server.login(SENDER_EMAIL, APP_PASSWORD)
@@ -200,10 +203,36 @@ def send_alert():
             app.logger.warning("🚫 Email not sent: APP_PASSWORD not configured.")
             return jsonify({'status': 'email not sent', 'message': 'APP_PASSWORD not configured'}), 500
 
-
     except Exception as e:
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# Optional: Temporary route to delete all user data (USE WITH EXTREME CAUTION AND REMOVE AFTER USE)
+# @app.route('/delete-all-user-data', methods=['POST'])
+# def delete_all_user_data():
+#     try:
+#         users_to_delete_uids = []
+#         for user_record in auth.list_users().iterate_all():
+#             users_to_delete_uids.append(user_record.uid)
+#
+#         if users_to_delete_uids:
+#             auth.delete_users(users_to_delete_uids)
+#             app.logger.info(f"Deleted {len(users_to_delete_uids)} users from Firebase Auth.")
+#
+#         users_ref = db.collection('users')
+#         docs = users_ref.stream()
+#         deleted_count = 0
+#         for doc in docs:
+#             doc.reference.delete()
+#             deleted_count += 1
+#         app.logger.info(f"Deleted {deleted_count} documents from 'users' collection in Firestore.")
+#
+#         return jsonify({'status': 'success', 'message': 'All user data deleted (Authentication and Users collection).'}), 200
+#
+#     except Exception as e:
+#         app.logger.error("Error deleting all user data: %s", str(e), exc_info=True)
+#         return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 @app.route('/')
 def index():

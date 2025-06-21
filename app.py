@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from email.mime.multipart import MIMultipart
 import os
 import json
 import logging
@@ -86,7 +86,7 @@ async def verify_admin_token(id_token):
 
 # === Signup ===
 @app.route('/signup', methods=['POST'])
-@app.route('/signup/', methods=['POST']) # Added route with trailing slash
+@app.route('/signup/', methods=['POST'])
 def signup():
     try:
         user = request.get_json(force=True)
@@ -117,7 +117,7 @@ def signup():
 
 # === Login (UID-Based) ===
 @app.route('/login', methods=['POST'])
-@app.route('/login/', methods=['POST']) # Added route with trailing slash
+@app.route('/login/', methods=['POST'])
 def login():
     try:
         content = request.get_json(force=True)
@@ -150,7 +150,7 @@ def login():
 
 # === Save Monthly QA Data ===
 @app.route('/save', methods=['POST'])
-@app.route('/save/', methods=['POST']) # Added route with trailing slash
+@app.route('/save/', methods=['POST'])
 def save_data():
     try:
         content = request.get_json(force=True)
@@ -200,7 +200,7 @@ def save_data():
 
 # === Load Monthly QA Data ===
 @app.route('/data', methods=['GET'])
-@app.route('/data/', methods=['GET']) # Added route with trailing slash
+@app.route('/data/', methods=['GET'])
 def get_data():
     month_param = request.args.get('month')
     uid = request.args.get('uid')
@@ -246,7 +246,7 @@ def get_data():
 
 # === Send Alert Email ===
 @app.route('/send-alert', methods=['POST'])
-@app.route('/send-alert/', methods=['POST']) # Added route with trailing slash
+@app.route('/send-alert/', methods=['POST'])
 def send_alert():
     try:
         content = request.get_json(force=True)
@@ -286,7 +286,7 @@ def send_alert():
 
 # Endpoint to get all pending users (Admin only)
 @app.route('/admin/pending-users', methods=['GET'])
-@app.route('/admin/pending-users/', methods=['GET']) # Added route with trailing slash
+@app.route('/admin/pending-users/', methods=['GET'])
 async def get_pending_users():
     id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
     is_admin, admin_uid = await verify_admin_token(id_token)
@@ -315,7 +315,7 @@ async def get_pending_users():
 
 # Endpoint to update user status (Approve/Reject) (Admin only)
 @app.route('/admin/update-user-status', methods=['POST'])
-@app.route('/admin/update-user-status/', methods=['POST']) # Added route with trailing slash
+@app.route('/admin/update-user-status/', methods=['POST'])
 async def update_user_status():
     id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
     is_admin, admin_uid = await verify_admin_token(id_token)
@@ -368,4 +368,13 @@ def index():
     return "✅ LINAC QA Backend Running"
 
 if __name__ == '__main__':
+    # NEW: Debugging: Log all registered routes on startup
+    with app.app_context(): # Ensure we are within an app context
+        app.logger.info("--- Registered Flask Routes ---")
+        for rule in app.url_map.iter_rules():
+            # Filter out internal/debug routes if desired
+            if 'static' not in rule.endpoint: # Exclude static files
+                 app.logger.info(f"Endpoint: {rule.endpoint}, Methods: {rule.methods}, Rule: {rule.rule}")
+        app.logger.info("-----------------------------")
+
     app.run(debug=True)

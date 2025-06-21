@@ -11,7 +11,7 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore
-from firebase_admin import auth # Added for programmatic user deletion (if needed in future)
+from firebase_admin import auth
 
 app = Flask(__name__)
 CORS(app)
@@ -20,10 +20,9 @@ app.logger.setLevel(logging.DEBUG)
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
-APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD') # Read from environment variable
+APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
-    # You might want to add a more robust error handling here, e.g., exit or disable email functionality
 
 
 # === Firebase Init ===
@@ -50,7 +49,7 @@ def signup():
         user = request.get_json(force=True)
         app.logger.info("🆕 Signup request: %s", user)
 
-        required = ['name', 'email', 'hospital', 'role', 'uid']
+        required = ['name', 'email', 'hospital', 'role', 'uid', 'status'] # 'status' added to required fields
         missing = [f for f in required if f not in user or user[f].strip() == ""]
         if missing:
             return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
@@ -62,8 +61,10 @@ def signup():
         user_ref.set({
             'name': user['name'],
             'email': user['email'].strip().lower(),
-            'hospital': user['hospital'],
-            'role': user['role']
+            'hospital': user['hospital'], # This is the centerId (value from dropdown)
+            'role': user['role'],
+            'centerId': user['hospital'], # Storing centerId based on dropdown value
+            'status': user['status'] # Storing the status (should be "pending")
         })
 
         return jsonify({'status': 'success', 'message': 'User registered successfully'}), 200
@@ -94,7 +95,9 @@ def login():
             'message': 'Login successful',
             'hospital': user_data.get("hospital", ""),
             'role': user_data.get("role", ""),
-            'uid': uid
+            'uid': uid,
+            'centerId': user_data.get("centerId", ""), # Pass centerId to frontend
+            'status': user_data.get("status", "unknown") # Pass status to frontend
         }), 200
 
     except Exception as e:
@@ -115,6 +118,14 @@ def save_data():
         month = f"Month_{content['month']}"
         raw_data = content['data']
 
+        # Retrieve centerId for the current user for data storage
+        user_doc = db.collection('users').document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found for saving data'}), 404
+        center_id = user_doc.to_dict().get('centerId')
+        if not center_id:
+            return jsonify({'status': 'error', 'message': 'User not linked to a center'}), 400
+
         if not isinstance(raw_data, list):
             return jsonify({'status': 'error', 'message': 'Data must be a 2D array'}), 400
 
@@ -127,10 +138,10 @@ def save_data():
                     'values': row[1:]
                 })
 
-        db.collection('linac_data').document(uid).collection('months').document(month).set(
+        db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {'data': converted_data}, merge=True)
 
-        app.logger.info("✅ Data saved for %s/%s", uid, month)
+        app.logger.info("✅ Data saved for %s/%s", center_id, month)
         return jsonify({'status': 'success'}), 200
 
     except Exception as e:
@@ -146,6 +157,14 @@ def get_data():
     if not month_param or not uid:
         return jsonify({'error': 'Missing "month" or "uid" parameter'}), 400
 
+    # Retrieve centerId for the current user to load data
+    user_doc = db.collection('users').document(uid).get()
+    if not user_doc.exists:
+        return jsonify({'error': 'User not found for loading data'}), 404
+    center_id = user_doc.to_dict().get('centerId')
+    if not center_id:
+        return jsonify({'error': 'User not linked to a center for data loading'}), 400
+
     doc_id = f"Month_{month_param}"
     try:
         year, mon = map(int, month_param.split("-"))
@@ -153,7 +172,7 @@ def get_data():
 
         energy_dict = {energy: [""] * num_days for energy in ENERGY_TYPES}
 
-        doc = db.collection('linac_data').document(uid).collection('months').document(doc_id).get()
+        doc = db.collection('linac_data').document(center_id).collection('months').document(doc_id).get()
         if doc.exists:
             data = doc.to_dict()
             for row in data.get('data', []):
@@ -175,12 +194,11 @@ def send_alert():
     try:
         content = request.get_json(force=True)
         out_values = content.get('outValues', [])
-        hospital_name = content.get('hospitalName', 'Unknown Hospital') # Get hospitalName from frontend
+        hospital_name = content.get('hospitalName', 'Unknown Hospital')
 
         if not out_values:
             return jsonify({'status': 'no alerts sent'})
 
-        # Include hospital name in the email body and subject
         message_body = f"Alert from Hospital: {hospital_name}\n\n"
         message_body += "The following LINAC QA output values are out of tolerance (±2.0%):\n\n"
         for val in out_values:
@@ -189,7 +207,7 @@ def send_alert():
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
-        msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}' # Add hospital name to subject
+        msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'
         msg.attach(MIMEText(message_body, 'plain'))
 
         if APP_PASSWORD:
@@ -206,33 +224,6 @@ def send_alert():
     except Exception as e:
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
-# Optional: Temporary route to delete all user data (USE WITH EXTREME CAUTION AND REMOVE AFTER USE)
-# @app.route('/delete-all-user-data', methods=['POST'])
-# def delete_all_user_data():
-#     try:
-#         users_to_delete_uids = []
-#         for user_record in auth.list_users().iterate_all():
-#             users_to_delete_uids.append(user_record.uid)
-#
-#         if users_to_delete_uids:
-#             auth.delete_users(users_to_delete_uids)
-#             app.logger.info(f"Deleted {len(users_to_delete_uids)} users from Firebase Auth.")
-#
-#         users_ref = db.collection('users')
-#         docs = users_ref.stream()
-#         deleted_count = 0
-#         for doc in docs:
-#             doc.reference.delete()
-#             deleted_count += 1
-#         app.logger.info(f"Deleted {deleted_count} documents from 'users' collection in Firestore.")
-#
-#         return jsonify({'status': 'success', 'message': 'All user data deleted (Authentication and Users collection).'}), 200
-#
-#     except Exception as e:
-#         app.logger.error("Error deleting all user data: %s", str(e), exc_info=True)
-#         return jsonify({'status': 'error', 'message': str(e)}), 500
-
 
 @app.route('/')
 def index():

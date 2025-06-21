@@ -13,7 +13,10 @@ import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
 app = Flask(__name__)
-CORS(app)
+# Explicitly allow your frontend domain for CORS requests
+# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
+# In production, ONLY list your actual frontend domain(s) for security.
+CORS(app, origins=["https://front-endnew.onrender.com"])
 app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===

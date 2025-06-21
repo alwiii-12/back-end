@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: backend-results
-    env: python
-    plan: free
-    buildCommand: ""
-    startCommand: gunicorn app:app
-    envVars: []

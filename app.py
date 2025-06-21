@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMultipart
+from email.mime.multipart import MIMEMultipart # Corrected: MIMEMultipart instead of MIMultipart
 import os
 import json
 import logging

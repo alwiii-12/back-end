@@ -88,7 +88,6 @@ def signup():
         user = request.get_json(force=True)
         app.logger.info("🆕 Signup request: %s", user)
 
-        # FIX: Removed the extra 'f' from 'f for f f in required'
         required = ['name', 'email', 'hospital', 'role', 'uid', 'status']
         missing = [f for f in required if f not in user or user[f].strip() == ""]
         if missing:
@@ -334,7 +333,7 @@ async def update_user_status():
             body = ""
             if new_status == 'active':
                 subject = "LINAC QA Account Approved!"
-                body = f"Dear {user_name},\n\nYour LINAC QA account has been approved by the administrator. You can now log in and start managing your data.\n\nLogin here: [Your Login Page URL]\n\nThank you,\nLINAC QA Team"
+                body = f"Dear {user_name},\n\nYour LINAC QA account has been approved by the administrator. You can now log in and start managing your data.\n\nLogin here: https://front-endnew.onrender.com/login.html\n\nThank you,\nLINAC QA Team"
             elif new_status == 'rejected':
                 subject = "LINAC QA Account Status Update"
                 body = f"Dear {user_name},\n\nYour LINAC QA account request has been reviewed. Unfortunately, your account was not approved at this time.\n\nIf you believe this is a mistake, please contact support.\n\nSincerely,\nLINAC QA Team"

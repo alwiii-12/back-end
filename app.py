@@ -88,8 +88,9 @@ def signup():
         user = request.get_json(force=True)
         app.logger.info("🆕 Signup request: %s", user)
 
+        # FIX: Removed the extra 'f' from 'f for f f in required'
         required = ['name', 'email', 'hospital', 'role', 'uid', 'status']
-        missing = [f for f f in required if f not in user or user[f].strip() == ""]
+        missing = [f for f in required if f not in user or user[f].strip() == ""]
         if missing:
             return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
 
@@ -164,9 +165,8 @@ def save_data():
         center_id = user_data.get('centerId')
         user_status = user_data.get('status')
         
-        # Check if user is active before allowing save
         if user_status != 'active':
-            return jsonify({'status': 'error', 'message': 'Account not active. Awaiting admin approval.'}), 403 # Forbidden
+            return jsonify({'status': 'error', 'message': 'Account not active. Awaiting admin approval.'}), 403
 
         if not center_id:
             return jsonify({'status': 'error', 'message': 'User not linked to a center'}), 400
@@ -209,9 +209,8 @@ def get_data():
     center_id = user_data.get('centerId')
     user_status = user_data.get('status')
 
-    # Check if user is active before allowing data load
     if user_status != 'active':
-        return jsonify({'error': 'Account not active. Awaiting admin approval.'}), 403 # Forbidden
+        return jsonify({'error': 'Account not active. Awaiting admin approval.'}), 403
 
     if not center_id:
         return jsonify({'error': 'User not linked to a center for data loading'}), 400
@@ -280,9 +279,9 @@ def send_alert():
 
 # Endpoint to get all pending users (Admin only)
 @app.route('/admin/pending-users', methods=['GET'])
-async def get_pending_users(): # Made async
+async def get_pending_users():
     id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
-    is_admin, admin_uid = await verify_admin_token(id_token) # await the call
+    is_admin, admin_uid = await verify_admin_token(id_token)
 
     if not is_admin:
         return jsonify({'message': 'Unauthorized: Admin access required.'}), 403
@@ -297,7 +296,7 @@ async def get_pending_users(): # Made async
                 'uid': doc.id,
                 'name': user_data.get('name'),
                 'email': user_data.get('email'),
-                'hospital': user_data.get('hospital'), # This is the centerId from dropdown
+                'hospital': user_data.get('hospital'),
                 'role': user_data.get('role'),
                 'status': user_data.get('status')
             })
@@ -308,9 +307,9 @@ async def get_pending_users(): # Made async
 
 # Endpoint to update user status (Approve/Reject) (Admin only)
 @app.route('/admin/update-user-status', methods=['POST'])
-async def update_user_status(): # Made async
+async def update_user_status():
     id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
-    is_admin, admin_uid = await verify_admin_token(id_token) # await the call
+    is_admin, admin_uid = await verify_admin_token(id_token)
 
     if not is_admin:
         return jsonify({'message': 'Unauthorized: Admin access required.'}), 403
@@ -326,7 +325,6 @@ async def update_user_status(): # Made async
         user_ref = db.collection('users').document(user_uid)
         user_ref.update({'status': new_status})
 
-        # --- NEW: Send email notification to user about status change ---
         user_data = user_ref.get().to_dict()
         user_email = user_data.get('email')
         user_name = user_data.get('name', 'User')

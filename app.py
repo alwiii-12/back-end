@@ -33,7 +33,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMEMultipart()
+    msg = MIMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -86,6 +86,7 @@ async def verify_admin_token(id_token):
 
 # === Signup ===
 @app.route('/signup', methods=['POST'])
+@app.route('/signup/', methods=['POST']) # Added route with trailing slash
 def signup():
     try:
         user = request.get_json(force=True)
@@ -116,6 +117,7 @@ def signup():
 
 # === Login (UID-Based) ===
 @app.route('/login', methods=['POST'])
+@app.route('/login/', methods=['POST']) # Added route with trailing slash
 def login():
     try:
         content = request.get_json(force=True)
@@ -148,6 +150,7 @@ def login():
 
 # === Save Monthly QA Data ===
 @app.route('/save', methods=['POST'])
+@app.route('/save/', methods=['POST']) # Added route with trailing slash
 def save_data():
     try:
         content = request.get_json(force=True)
@@ -197,6 +200,7 @@ def save_data():
 
 # === Load Monthly QA Data ===
 @app.route('/data', methods=['GET'])
+@app.route('/data/', methods=['GET']) # Added route with trailing slash
 def get_data():
     month_param = request.args.get('month')
     uid = request.args.get('uid')
@@ -242,6 +246,7 @@ def get_data():
 
 # === Send Alert Email ===
 @app.route('/send-alert', methods=['POST'])
+@app.route('/send-alert/', methods=['POST']) # Added route with trailing slash
 def send_alert():
     try:
         content = request.get_json(force=True)
@@ -256,7 +261,7 @@ def send_alert():
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
-        msg = MIMEMultipart()
+        msg = MIMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'
@@ -281,6 +286,7 @@ def send_alert():
 
 # Endpoint to get all pending users (Admin only)
 @app.route('/admin/pending-users', methods=['GET'])
+@app.route('/admin/pending-users/', methods=['GET']) # Added route with trailing slash
 async def get_pending_users():
     id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
     is_admin, admin_uid = await verify_admin_token(id_token)
@@ -309,6 +315,7 @@ async def get_pending_users():
 
 # Endpoint to update user status (Approve/Reject) (Admin only)
 @app.route('/admin/update-user-status', methods=['POST'])
+@app.route('/admin/update-user-status/', methods=['POST']) # Added route with trailing slash
 async def update_user_status():
     id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
     is_admin, admin_uid = await verify_admin_token(id_token)

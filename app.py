@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart # Corrected: MIMEMultipart instead of MIMultipart
+from email.mime.multipart import MIMEMultipart
 import os
 import json
 import logging
@@ -13,10 +13,9 @@ import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
 app = Flask(__name__)
-# Explicitly allow your frontend domain for CORS requests
-# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
-# In production, ONLY list your actual frontend domain(s) for security.
-CORS(app, origins=["https://front-endnew.onrender.com"])
+# TEMPORARY: Broaden CORS for debugging TypeError: Failed to fetch
+# This is NOT secure for production!
+CORS(app, origins="*", allow_headers="*", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
@@ -33,7 +32,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMultipart()
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject

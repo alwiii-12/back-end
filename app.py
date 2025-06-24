@@ -12,21 +12,24 @@ from calendar import monthrange
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
-# Attempt to import FieldValue using common paths
+
+app = Flask(__name__)
+# Explicitly allow your frontend domain for CORS requests
+# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
+# In production, ONLY list your actual frontend domain(s) for security.
+CORS(app, origins=["https://front-endnew.onrender.com"])
+app.logger.setLevel(logging.DEBUG)
+
+# NEW: Attempt to import FieldValue using common paths (Moved after app definition)
 try:
     from firebase_admin.firestore import FieldValue
 except ImportError:
     try:
         from google.cloud.firestore import FieldValue
     except ImportError:
-        # Fallback if neither direct import works (less common but covers all bases)
-        FieldValue = None # This will cause a clearer error if used without successful import
+        FieldValue = None # Will cause a clearer error if used without successful import
         app.logger.error("🔥 CRITICAL ERROR: Could not import FieldValue. 'last_saved_at' feature will fail.")
 
-
-app = Flask(__name__)
-CORS(app, origins=["https://front-endnew.onrender.com"])
-app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')

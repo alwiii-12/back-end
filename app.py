@@ -11,7 +11,7 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from firebase_admin.firestore import FieldValue
+
 
 app = Flask(__name__)
 # Explicitly allow your frontend domain for CORS requests

@@ -11,23 +11,13 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from datetime import datetime # NEW: Import datetime for fallback timestamp
-
-# Attempt to import FieldValue for server_timestamp, with fallback
-try:
-    from firebase_admin.firestore import FieldValue # Attempt primary import
-    def get_server_timestamp():
-        return FieldValue.server_timestamp()
-except ImportError:
-    # Fallback if FieldValue cannot be imported (use Python's datetime)
-    app.logger.warning("🚫 FieldValue.server_timestamp() could not be imported. Using local datetime as fallback.")
-    def get_server_timestamp():
-        return datetime.utcnow() # Use UTC datetime as a fallback
+from datetime import datetime # Import datetime for fallback timestamp
 
 
 app = Flask(__name__)
 CORS(app, origins=["https://front-endnew.onrender.com"])
 app.logger.setLevel(logging.DEBUG)
+
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
@@ -76,6 +66,23 @@ try:
 except Exception as e:
     app.logger.error("🔥 Firebase init failed: %s", str(e))
     raise
+
+# NEW: Attempt to import FieldValue for server_timestamp, with fallback (MOVED HERE)
+try:
+    from firebase_admin.firestore import FieldValue # Attempt primary import
+    def get_server_timestamp():
+        return FieldValue.server_timestamp()
+except ImportError:
+    try: # If first import failed, try the google-cloud-firestore path
+        from google.cloud.firestore import FieldValue
+        def get_server_timestamp():
+            return FieldValue.server_timestamp()
+    except ImportError:
+        # Fallback if neither direct import works (use Python's datetime)
+        app.logger.warning("🚫 FieldValue.server_timestamp() could not be imported. Using local datetime as fallback.")
+        def get_server_timestamp():
+            return datetime.utcnow() # Use UTC datetime as a fallback
+
 
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
@@ -296,7 +303,6 @@ def send_alert():
             server.send_message(msg)
             server.quit()
             app.logger.info("📧 Alert email sent successfully.")
-            return jsonify({'status': 'alert sent'})
         else:
             app.logger.warning(f"🚫 Email notification not sent to {user_email}: Missing email or APP_PASSWORD.")
 
@@ -304,7 +310,7 @@ def send_alert():
         return jsonify({'status': 'success', 'message': f'User {user_uid} status updated to {new_status}'}), 200
 
     except Exception as e:
-        app.logger.error("Error updating user status: %s", str(e), exc_info=True)
+        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'message': 'Internal Server Error'}), 500
 
 

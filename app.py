@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart # Corrected: MIMEMultipart instead of MIMultipart
+from email.mime.multipart import MIMEMultipart
 import os
 import json
 import logging
@@ -10,25 +10,22 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth
-from firebase_admin.firestore import FieldValue # NEW: Import FieldValue for server timestamp
+from firebase_admin import credentials, firestore, auth # firestore is already imported
+
+# FIX: Removed direct import of FieldValue, it's accessed via firestore.FieldValue
+# from firebase_admin.firestore import FieldValue # Removed this line
+
 
 app = Flask(__name__)
-# Explicitly allow your frontend domain for CORS requests
-# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
-# In production, ONLY list your actual frontend domain(s) for security.
-# TEMPORARY: Broaden CORS for debugging TypeError: Failed to fetch (if needed). Revert to specific origins in production.
-CORS(app, origins=["https://front-endnew.onrender.com"]) # Specific origin for production
-# CORS(app, origins="*", allow_headers="*", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]) # Temporary broad for debugging
+CORS(app, origins=["https://front-endnew.onrender.com"])
 app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
-
 
 # --- NEW: Helper function to send notification emails ---
 def send_notification_email(recipient_email, subject, body):
@@ -36,7 +33,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMultipart()
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -52,8 +49,8 @@ def send_notification_email(recipient_email, subject, body):
     except Exception as e:
         app.logger.error(f"❌ Failed to send notification email to {recipient_email}: {str(e)}", exc_info=True)
         return False
-# --- END NEW HELPER ---
 
+# --- END NEW HELPER ---
 
 # === Firebase Init ===
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -89,7 +86,7 @@ async def verify_admin_token(id_token):
 
 # === Signup ===
 @app.route('/signup', methods=['POST'])
-@app.route('/signup/', methods=['POST']) # Added route with trailing slash
+@app.route('/signup/', methods=['POST'])
 def signup():
     try:
         user = request.get_json(force=True)
@@ -194,7 +191,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': FieldValue.server_timestamp() # NEW: Store server timestamp
+                'last_saved_at': firestore.FieldValue.server_timestamp() # FIX: Use firestore.FieldValue.server_timestamp()
             },
             merge=True
         )
@@ -238,13 +235,13 @@ def get_data():
 
         doc = db.collection('linac_data').document(center_id).collection('months').document(doc_id).get()
         if doc.exists:
-            data_from_db = doc.to_dict() # Get all data from the document
+            data_from_db = doc.to_dict()
             
             # Extract main QA data
             data = data_from_db.get('data', [])
 
             # Extract last_saved_at timestamp
-            last_saved_timestamp = data_from_db.get('last_saved_at')
+            last_saved_timestamp = data_from_db.get('last_saved_at') # This will be a Firestore Timestamp object
 
             for row in data:
                 energy = row.get('energy', '')
@@ -254,7 +251,11 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            # Return both data and timestamp
+            # Return both data and timestamp. Convert timestamp to a serializable format if needed
+            # For JSON, Firestore Timestamp objects are usually converted automatically,
+            # but if not, you might need to convert it to ISO string or Unix timestamp.
+            # Example: last_saved_timestamp.timestamp() for Unix seconds
+            # Example: last_saved_timestamp.isoformat() for ISO string
             return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200
 
     except Exception as e:
@@ -292,92 +293,14 @@ def send_alert():
             app.logger.info("📧 Alert email sent successfully.")
             return jsonify({'status': 'alert sent'})
         else:
-            app.logger.warning("🚫 Email not sent: APP_PASSWORD not configured.")
-            return jsonify({'status': 'email not sent', 'message': 'APP_PASSWORD not configured'}), 500
-
-    except Exception as e:
-        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-# === ADMIN ENDPOINTS ===
-
-# Endpoint to get all pending users (Admin only)
-@app.route('/admin/pending-users', methods=['GET'])
-@app.route('/admin/pending-users/', methods=['GET'])
-async def get_pending_users():
-    id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
-    is_admin, admin_uid = await verify_admin_token(id_token)
-
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized: Admin access required.'}), 403
-
-    try:
-        pending_users_ref = db.collection('users').where('status', '==', 'pending')
-        docs = pending_users_ref.stream()
-        users_list = []
-        for doc in docs:
-            user_data = doc.to_dict()
-            users_list.append({
-                'uid': doc.id,
-                'name': user_data.get('name'),
-                'email': user_data.get('email'),
-                'hospital': user_data.get('hospital'),
-                'role': user_data.get('role'),
-                'status': user_data.get('status')
-            })
-        return jsonify(users_list), 200
-    except Exception as e:
-        app.logger.error("Error fetching pending users: %s", str(e), exc_info=True)
-        return jsonify({'message': 'Internal Server Error'}), 500
-
-# Endpoint to update user status (Approve/Reject) (Admin only)
-@app.route('/admin/update-user-status', methods=['POST'])
-@app.route('/admin/update-user-status/', methods=['POST'])
-async def update_user_status():
-    id_token = request.headers.get('Authorization', '').split('Bearer ')[-1]
-    is_admin, admin_uid = await verify_admin_token(id_token)
-
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized: Admin access required.'}), 403
-
-    try:
-        content = request.get_json(force=True)
-        user_uid = content.get('uid')
-        new_status = content.get('status')
-
-        if not user_uid or new_status not in ['active', 'rejected']:
-            return jsonify({'message': 'Missing user UID or invalid status.'}), 400
-
-        user_ref = db.collection('users').document(user_uid)
-        user_ref.update({'status': new_status})
-
-        user_data = user_ref.get().to_dict()
-        user_email = user_data.get('email')
-        user_name = user_data.get('name', 'User')
-
-        if user_email and APP_PASSWORD:
-            subject = ""
-            body = ""
-            if new_status == 'active':
-                subject = "LINAC QA Account Approved!"
-                body = f"Dear {user_name},\n\nYour LINAC QA account has been approved by the administrator. You can now log in and start managing your data.\n\nLogin here: https://front-endnew.onrender.com/login.html\n\nThank you,\nLINAC QA Team"
-            elif new_status == 'rejected':
-                subject = "LINAC QA Account Status Update"
-                body = f"Dear {user_name},\n\nYour LINAC QA account request has been reviewed. Unfortunately, your account was not approved at this time.\n\nIf you believe this is a mistake, please contact support.\n\nSincerely,\nLINAC QA Team"
-            
-            if subject and body:
-                send_notification_email(user_email, subject, body)
-            else:
-                app.logger.warning(f"Failed to prepare email for {user_email}: Missing subject/body for status {new_status}")
-        else:
             app.logger.warning(f"🚫 Email notification not sent to {user_email}: Missing email or APP_PASSWORD.")
 
         app.logger.info(f"User {user_uid} status updated to {new_status} by Admin {admin_uid}.")
         return jsonify({'status': 'success', 'message': f'User {user_uid} status updated to {new_status}'}), 200
 
     except Exception as e:
-        app.logger.error("Error updating user status: %s", str(e), exc_info=True)
-        return jsonify({'message': 'Internal Server Error'}), 500
+        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/')

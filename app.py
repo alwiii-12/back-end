@@ -10,26 +10,15 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth
+from firebase_admin import credentials, firestore, auth # firestore is imported here
+# REMOVED problematic FieldValue import:
+# from firebase_admin.firestore import FieldValue
+# from google.cloud.firestore import FieldValue
 
 
 app = Flask(__name__)
-# Explicitly allow your frontend domain for CORS requests
-# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
-# In production, ONLY list your actual frontend domain(s) for security.
 CORS(app, origins=["https://front-endnew.onrender.com"])
 app.logger.setLevel(logging.DEBUG)
-
-# NEW: Attempt to import FieldValue using common paths (Moved after app definition)
-try:
-    from firebase_admin.firestore import FieldValue
-except ImportError:
-    try:
-        from google.cloud.firestore import FieldValue
-    except ImportError:
-        FieldValue = None # Will cause a clearer error if used without successful import
-        app.logger.error("🔥 CRITICAL ERROR: Could not import FieldValue. 'last_saved_at' feature will fail.")
-
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
@@ -203,7 +192,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': FieldValue.server_timestamp() # Uses FieldValue from import
+                'last_saved_at': firestore.FieldValue.server_timestamp() # Uses firestore.FieldValue from import
             },
             merge=True
         )

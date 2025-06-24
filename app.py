@@ -10,10 +10,8 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth # firestore is already imported
-# FIX: Removed direct import of FieldValue, it's accessed via firestore.FieldValue
-# from firebase_admin.firestore import FieldValue # REMOVED THIS LINE AGAIN
-
+from firebase_admin import credentials, firestore, auth
+from firebase_admin.firestore import FieldValue
 
 app = Flask(__name__)
 # Explicitly allow your frontend domain for CORS requests
@@ -63,7 +61,7 @@ if not firebase_json:
 try:
     firebase_dict = json.loads(firebase_json)
     cred = credentials.Certificate(firebase_dict)
-    firebase_admin.initializeApp(cred)
+    firebase_admin.initialize_app(cred) # FIX: Corrected function name
     db = firestore.client()
     app.logger.info("✅ Firebase initialized.")
 except Exception as e:
@@ -194,7 +192,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # FIX: Correctly access FieldValue
+                'last_saved_at': firestore.FieldValue.server_timestamp()
             },
             merge=True
         )

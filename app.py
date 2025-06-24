@@ -11,7 +11,18 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from firebase_admin.firestore import FieldValue # RE-IMPLEMENTED: This line should now work correctly
+from datetime import datetime # NEW: Import datetime for fallback timestamp
+
+# Attempt to import FieldValue for server_timestamp, with fallback
+try:
+    from firebase_admin.firestore import FieldValue # Attempt primary import
+    def get_server_timestamp():
+        return FieldValue.server_timestamp()
+except ImportError:
+    # Fallback if FieldValue cannot be imported (use Python's datetime)
+    app.logger.warning("🚫 FieldValue.server_timestamp() could not be imported. Using local datetime as fallback.")
+    def get_server_timestamp():
+        return datetime.utcnow() # Use UTC datetime as a fallback
 
 
 app = Flask(__name__)
@@ -20,7 +31,7 @@ app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
@@ -190,7 +201,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # Re-added: Use FieldValue from import
+                'last_saved_at': get_server_timestamp() # Uses the defined get_server_timestamp function
             },
             merge=True
         )
@@ -240,7 +251,7 @@ def get_data():
             data = data_from_db.get('data', [])
 
             # Extract last_saved_at timestamp
-            last_saved_timestamp = data_from_db.get('last_saved_at') # Re-added: Extract timestamp
+            last_saved_timestamp = data_from_db.get('last_saved_at')
 
             for row in data:
                 energy = row.get('energy', '')
@@ -250,7 +261,7 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200 # Re-added: Return timestamp
+            return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200
 
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
@@ -273,7 +284,7 @@ def send_alert():
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
-        msg = MIMultipart()
+        msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'

@@ -11,7 +11,7 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from google.cloud.firestore import FieldValue # NEW: More direct import for FieldValue
+from google.cloud.firestore import FieldValue # FINAL CORRECT IMPORT FOR FieldValue
 
 
 app = Flask(__name__)
@@ -156,7 +156,7 @@ def save_data():
         app.logger.info("📥 Save request: %s", content)
 
         if 'month' not in content or 'data' not in content or 'uid' not in content:
-            return jsonify({'status': 'error', 'message': 'Missing "month", "uid", or "data"'}), 400
+            return jsonify({'status': 'error', 'message': f'Missing "month", "uid", or "data"'}), 400
 
         uid = content['uid']
         month = f"Month_{content['month']}"
@@ -190,7 +190,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': FieldValue.server_timestamp() # Uses FieldValue directly now
+                'last_saved_at': FieldValue.server_timestamp() # Uses FieldValue from import
             },
             merge=True
         )
@@ -293,7 +293,7 @@ def send_alert():
         return jsonify({'status': 'success', 'message': f'User {user_uid} status updated to {new_status}'}), 200
 
     except Exception as e:
-        app.logger.error("Error updating user status: %s", str(e), exc_info=True)
+        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'message': 'Internal Server Error'}), 500
 
 

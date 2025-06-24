@@ -11,7 +11,7 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-# REMOVED FieldValue import entirely
+from firebase_admin.firestore import FieldValue # RE-IMPLEMENTED: This line should now work correctly
 
 
 app = Flask(__name__)
@@ -20,7 +20,7 @@ app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
@@ -190,7 +190,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                # 'last_saved_at': FieldValue.server_timestamp() # REMOVED: last_saved_at feature
+                'last_saved_at': firestore.FieldValue.server_timestamp() # Re-added: Use FieldValue from import
             },
             merge=True
         )
@@ -239,8 +239,8 @@ def get_data():
             # Extract main QA data
             data = data_from_db.get('data', [])
 
-            # last_saved_at is no longer extracted/returned
-            # last_saved_timestamp = data_from_db.get('last_saved_at') 
+            # Extract last_saved_at timestamp
+            last_saved_timestamp = data_from_db.get('last_saved_at') # Re-added: Extract timestamp
 
             for row in data:
                 energy = row.get('energy', '')
@@ -250,7 +250,7 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            return jsonify({'data': table}), 200 # Removed last_saved_at from return
+            return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200 # Re-added: Return timestamp
 
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
@@ -273,7 +273,7 @@ def send_alert():
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
-        msg = MIMEMultipart()
+        msg = MIMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'

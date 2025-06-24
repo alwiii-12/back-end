@@ -10,20 +10,17 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth # firestore is imported here
-# The problematic line 'from firebase_admin.firestore import FieldValue' has been removed
-# FieldValue will be accessed directly via firestore.FieldValue
+from firebase_admin import credentials, firestore, auth
+from google.cloud.firestore import FieldValue # NEW: More direct import for FieldValue
+
 
 app = Flask(__name__)
-# Explicitly allow your frontend domain for CORS requests
-# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
-# In production, ONLY list your actual frontend domain(s) for security.
 CORS(app, origins=["https://front-endnew.onrender.com"])
 app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
@@ -35,7 +32,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMultipart()
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -193,7 +190,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # Correctly access FieldValue
+                'last_saved_at': FieldValue.server_timestamp() # Uses FieldValue directly now
             },
             merge=True
         )

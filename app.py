@@ -11,13 +11,9 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from datetime import datetime # Import datetime for persistent timestamp
-
-
-# Define get_server_timestamp to always use datetime.utcnow()
-# This bypasses the problematic FieldValue import entirely
-def get_server_timestamp():
-    return datetime.utcnow() # Use UTC datetime as the persistent timestamp
+# From previous successful deployments, this import seems to work for FieldValue:
+from firebase_admin.firestore import FieldValue
+from datetime import datetime # Import datetime for robust timestamp handling and fallback
 
 
 app = Flask(__name__)
@@ -26,7 +22,7 @@ app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
@@ -196,7 +192,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': get_server_timestamp() # Uses the defined get_server_timestamp function
+                'last_saved_at': firestore.FieldValue.server_timestamp() # Using FieldValue from import
             },
             merge=True
         )
@@ -247,6 +243,9 @@ def get_data():
 
             # Extract last_saved_at timestamp
             last_saved_timestamp = data_from_db.get('last_saved_at')
+            # NEW: Convert Python datetime to ISO format string with 'Z' for UTC if it's a datetime object
+            if isinstance(last_saved_timestamp, datetime):
+                last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z' # Add Z for UTC
 
             for row in data:
                 energy = row.get('energy', '')
@@ -256,10 +255,6 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            # For datetime objects, convert to ISO format string before jsonify
-            if isinstance(last_saved_timestamp, datetime):
-                last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z' # Add Z for UTC
-
             return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200
 
     except Exception as e:
@@ -293,15 +288,17 @@ def send_alert():
             server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
             server.login(SENDER_EMAIL, APP_PASSWORD)
             server.send_message(msg)
+            app.logger.info("📧 Alert email sent successfully.")
             return jsonify({'status': 'alert sent'}), 200
         else:
             app.logger.warning(f"🚫 Email notification not sent to {user_email}: Missing email or APP_PASSWORD.")
 
-        app.logger.info(f"User {user_uid} status updated to {new_status} by Admin {admin_uid}.")
-        return jsonify({'status': 'success', 'message': f'User {user_uid} status updated to {new_status}'}), 200
+        # Removed the problematic line that caused NameError (user_uid, new_status not defined here)
+        # app.logger.info(f"User {user_uid} status updated to {new_status} by Admin {admin_uid}.")
+        return jsonify({'status': 'success', 'message': 'Alert processing complete.'}), 200 # Simplified return message
 
     except Exception as e:
-        app.logger.error("Error updating user status: %s", str(e), exc_info=True)
+        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
         return jsonify({'message': 'Internal Server Error'}), 500
 
 

@@ -10,8 +10,10 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth
-from firebase_admin.firestore import FieldValue # CORRECTED: Re-import FieldValue directly
+from firebase_admin import credentials, firestore, auth # firestore is already imported
+# FIX: Removed direct import of FieldValue, it's accessed via firestore.FieldValue
+# from firebase_admin.firestore import FieldValue # REMOVED THIS LINE AGAIN
+
 
 app = Flask(__name__)
 # Explicitly allow your frontend domain for CORS requests
@@ -61,7 +63,7 @@ if not firebase_json:
 try:
     firebase_dict = json.loads(firebase_json)
     cred = credentials.Certificate(firebase_dict)
-    firebase_admin.initialize_app(cred)
+    firebase_admin.initializeApp(cred)
     db = firestore.client()
     app.logger.info("✅ Firebase initialized.")
 except Exception as e:
@@ -192,7 +194,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # FIX: Use firestore.FieldValue.server_timestamp()
+                'last_saved_at': firestore.FieldValue.server_timestamp() # FIX: Correctly access FieldValue
             },
             merge=True
         )
@@ -295,7 +297,7 @@ def send_alert():
         return jsonify({'status': 'success', 'message': f'User {user_uid} status updated to {new_status}'}), 200
 
     except Exception as e:
-        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
+        app.logger.error("Error updating user status: %s", str(e), exc_info=True)
         return jsonify({'message': 'Internal Server Error'}), 500
 
 

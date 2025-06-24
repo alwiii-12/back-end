@@ -11,7 +11,17 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from google.cloud.firestore import FieldValue # FINAL CORRECT IMPORT FOR FieldValue
+
+# Attempt to import FieldValue using common paths
+try:
+    from firebase_admin.firestore import FieldValue
+except ImportError:
+    try:
+        from google.cloud.firestore import FieldValue
+    except ImportError:
+        # Fallback if neither direct import works (less common but covers all bases)
+        FieldValue = None # This will cause a clearer error if used without successful import
+        app.logger.error("🔥 CRITICAL ERROR: Could not import FieldValue. 'last_saved_at' feature will fail.")
 
 
 app = Flask(__name__)
@@ -293,7 +303,7 @@ def send_alert():
         return jsonify({'status': 'success', 'message': f'User {user_uid} status updated to {new_status}'}), 200
 
     except Exception as e:
-        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
+        app.logger.error("Error updating user status: %s", str(e), exc_info=True)
         return jsonify({'message': 'Internal Server Error'}), 500
 
 

@@ -10,8 +10,9 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth
-
+from firebase_admin import credentials, firestore, auth # firestore is imported here
+# The problematic line 'from firebase_admin.firestore import FieldValue' has been removed
+# FieldValue will be accessed directly via firestore.FieldValue
 
 app = Flask(__name__)
 # Explicitly allow your frontend domain for CORS requests
@@ -34,7 +35,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMEMultipart()
+    msg = MIMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -61,7 +62,7 @@ if not firebase_json:
 try:
     firebase_dict = json.loads(firebase_json)
     cred = credentials.Certificate(firebase_dict)
-    firebase_admin.initialize_app(cred) # FIX: Corrected function name
+    firebase_admin.initialize_app(cred)
     db = firestore.client()
     app.logger.info("✅ Firebase initialized.")
 except Exception as e:
@@ -192,7 +193,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp()
+                'last_saved_at': firestore.FieldValue.server_timestamp() # Correctly access FieldValue
             },
             merge=True
         )

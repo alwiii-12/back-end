@@ -10,10 +10,8 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth # firestore is imported here
-# REMOVED problematic FieldValue import:
-# from firebase_admin.firestore import FieldValue
-# from google.cloud.firestore import FieldValue
+from firebase_admin import credentials, firestore, auth
+# REMOVED FieldValue import entirely
 
 
 app = Flask(__name__)
@@ -192,7 +190,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # Uses firestore.FieldValue from import
+                # 'last_saved_at': FieldValue.server_timestamp() # REMOVED: last_saved_at feature
             },
             merge=True
         )
@@ -241,8 +239,8 @@ def get_data():
             # Extract main QA data
             data = data_from_db.get('data', [])
 
-            # Extract last_saved_at timestamp
-            last_saved_timestamp = data_from_db.get('last_saved_at')
+            # last_saved_at is no longer extracted/returned
+            # last_saved_timestamp = data_from_db.get('last_saved_at') 
 
             for row in data:
                 energy = row.get('energy', '')
@@ -252,7 +250,7 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200
+            return jsonify({'data': table}), 200 # Removed last_saved_at from return
 
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)

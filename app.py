@@ -11,19 +11,22 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from firebase_admin.firestore import FieldValue # Re-implemented: This line should now work correctly
+from datetime import datetime # Import datetime for persistent timestamp
+
+
+# Define get_server_timestamp to always use datetime.utcnow()
+# This bypasses the problematic FieldValue import entirely
+def get_server_timestamp():
+    return datetime.utcnow() # Use UTC datetime as the persistent timestamp
 
 
 app = Flask(__name__)
-# Explicitly allow your frontend domain for CORS requests
-# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
-# In production, ONLY list your actual frontend domain(s) for security.
 CORS(app, origins=["https://front-endnew.onrender.com"])
 app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
@@ -35,7 +38,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMultipart()
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -193,7 +196,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # Uses FieldValue from import
+                'last_saved_at': get_server_timestamp() # Uses the defined get_server_timestamp function
             },
             merge=True
         )
@@ -253,6 +256,10 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
+            # For datetime objects, convert to ISO format string before jsonify
+            if isinstance(last_saved_timestamp, datetime):
+                last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z' # Add Z for UTC
+
             return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200
 
     except Exception as e:
@@ -286,15 +293,15 @@ def send_alert():
             server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
             server.login(SENDER_EMAIL, APP_PASSWORD)
             server.send_message(msg)
-            server.quit()
-            app.logger.info("📧 Alert email sent successfully.")
-            return jsonify({'status': 'alert sent'}), 200 # Corrected return for alert success
+            return jsonify({'status': 'alert sent'}), 200
         else:
-            app.logger.warning(f"🚫 Email not sent: APP_PASSWORD not configured.")
-            return jsonify({'status': 'email not sent', 'message': 'APP_PASSWORD not configured'}), 500 # Still 500 as it's a server config issue
+            app.logger.warning(f"🚫 Email notification not sent to {user_email}: Missing email or APP_PASSWORD.")
+
+        app.logger.info(f"User {user_uid} status updated to {new_status} by Admin {admin_uid}.")
+        return jsonify({'status': 'success', 'message': f'User {user_uid} status updated to {new_status}'}), 200
 
     except Exception as e:
-        app.logger.error("❌ Email error: %s", str(e), exc_info=True)
+        app.logger.error("Error updating user status: %s", str(e), exc_info=True)
         return jsonify({'message': 'Internal Server Error'}), 500
 
 

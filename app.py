@@ -10,22 +10,23 @@ from calendar import monthrange
 
 # Firebase Admin SDK
 import firebase_admin
-from firebase_admin import credentials, firestore, auth # firestore is already imported
-
-# FIX: Removed direct import of FieldValue, it's accessed via firestore.FieldValue
-# from firebase_admin.firestore import FieldValue # Removed this line
-
+from firebase_admin import credentials, firestore, auth
+from firebase_admin.firestore import FieldValue # CORRECTED: Re-import FieldValue directly
 
 app = Flask(__name__)
+# Explicitly allow your frontend domain for CORS requests
+# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual, exact frontend URL
+# In production, ONLY list your actual frontend domain(s) for security.
 CORS(app, origins=["https://front-endnew.onrender.com"])
 app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
+
 
 # --- NEW: Helper function to send notification emails ---
 def send_notification_email(recipient_email, subject, body):
@@ -49,8 +50,8 @@ def send_notification_email(recipient_email, subject, body):
     except Exception as e:
         app.logger.error(f"❌ Failed to send notification email to {recipient_email}: {str(e)}", exc_info=True)
         return False
-
 # --- END NEW HELPER ---
+
 
 # === Firebase Init ===
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -241,7 +242,7 @@ def get_data():
             data = data_from_db.get('data', [])
 
             # Extract last_saved_at timestamp
-            last_saved_timestamp = data_from_db.get('last_saved_at') # This will be a Firestore Timestamp object
+            last_saved_timestamp = data_from_db.get('last_saved_at')
 
             for row in data:
                 energy = row.get('energy', '')
@@ -251,11 +252,6 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            # Return both data and timestamp. Convert timestamp to a serializable format if needed
-            # For JSON, Firestore Timestamp objects are usually converted automatically,
-            # but if not, you might need to convert it to ISO string or Unix timestamp.
-            # Example: last_saved_timestamp.timestamp() for Unix seconds
-            # Example: last_saved_timestamp.isoformat() for ISO string
             return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200
 
     except Exception as e:
@@ -300,7 +296,7 @@ def send_alert():
 
     except Exception as e:
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'message': 'Internal Server Error'}), 500
 
 
 @app.route('/')

@@ -1,4 +1,0 @@
-flask[async]
-flask-cors
-gunicorn
-firebase-admin

@@ -11,9 +11,13 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-# From previous successful deployments, this import seems to work for FieldValue:
-from firebase_admin.firestore import FieldValue
-from datetime import datetime # Import datetime for robust timestamp handling and fallback
+from datetime import datetime # Import datetime for persistent timestamp
+
+
+# Define get_server_timestamp to always use datetime.utcnow()
+# This bypasses the problematic FieldValue import entirely
+def get_server_timestamp():
+    return datetime.utcnow() # Use UTC datetime as the persistent timestamp
 
 
 app = Flask(__name__)
@@ -22,7 +26,7 @@ app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
@@ -192,7 +196,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # Using FieldValue from import
+                'last_saved_at': get_server_timestamp() # Uses the defined get_server_timestamp function
             },
             merge=True
         )
@@ -243,7 +247,8 @@ def get_data():
 
             # Extract last_saved_at timestamp
             last_saved_timestamp = data_from_db.get('last_saved_at')
-            # NEW: Convert Python datetime to ISO format string with 'Z' for UTC if it's a datetime object
+
+            # Convert Python datetime to ISO format string with 'Z' for UTC
             if isinstance(last_saved_timestamp, datetime):
                 last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z' # Add Z for UTC
 
@@ -278,7 +283,7 @@ def send_alert():
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
-        msg = MIMEMultipart()
+        msg = MIMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'
@@ -293,9 +298,7 @@ def send_alert():
         else:
             app.logger.warning(f"🚫 Email notification not sent to {user_email}: Missing email or APP_PASSWORD.")
 
-        # Removed the problematic line that caused NameError (user_uid, new_status not defined here)
-        # app.logger.info(f"User {user_uid} status updated to {new_status} by Admin {admin_uid}.")
-        return jsonify({'status': 'success', 'message': 'Alert processing complete.'}), 200 # Simplified return message
+        return jsonify({'status': 'success', 'message': 'Alert processing complete.'}), 200
 
     except Exception as e:
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)

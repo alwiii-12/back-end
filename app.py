@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart # FINAL CONFIRMED IMPORT FOR MIMEMULTIPART
 import os
 import json
 import logging
@@ -10,20 +11,6 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-
-# Try to import MIMEMultipart robustly, with fallback if it fails
-try:
-    from email.mime.multipart import MIMEMultipart
-except ImportError:
-    # Define a dummy MIMEMultipart if it cannot be imported, to prevent crash
-    # This will cause send_notification_email to fail gracefully if used
-    class MIMEMultipart:
-        def __init__(self, *args, **kwargs):
-            logging.warning("MIMEMultipart could not be imported. Email functionality will be disabled.")
-        def __getattr__(self, name): # Allow access to any attribute without error
-            return None
-        def attach(self, part): pass
-        def __setitem__(self, key, value): pass
 
 
 app = Flask(__name__)
@@ -44,12 +31,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    # Check if MIMEMultipart was successfully imported, or if it's our dummy
-    if not isinstance(MIMEMultipart, type) or MIMEMultipart.__name__ != 'MIMEMultipart': # Check if it's the actual class or a dummy
-        app.logger.error("MIMEMultipart class not properly defined. Email sending aborted.")
-        return False
-
-    msg = MIMEMultipart()
+    msg = MIMEMultipart() # This should now be correctly defined
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -206,7 +188,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                # REMOVED: 'last_saved_at' field - no timestamp saved anymore
+                # 'last_saved_at': firestore.FieldValue.server_timestamp() # Removed FieldValue (as per user request)
             },
             merge=True
         )
@@ -257,9 +239,6 @@ def get_data():
 
             # REMOVED: last_saved_at extraction
             # last_saved_timestamp = data_from_db.get('last_saved_at')
-            # REMOVED: datetime conversion
-            # if isinstance(last_saved_timestamp, datetime):
-            #     last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z'
 
             for row in data:
                 energy = row.get('energy', '')
@@ -288,7 +267,8 @@ def send_alert():
         if not out_values:
             return jsonify({'status': 'no alerts sent'})
 
-        # Check if MIMEMultipart was successfully imported, or if it's our dummy
+        # Check if MIMEMultipart was successfully imported
+        # This check is now redundant if the top-level import is fixed, but adds robustness
         if not isinstance(MIMEMultipart, type) or MIMEMultipart.__name__ != 'MIMEMultipart': # Safety check for dummy class
             app.logger.error("MIMEMultipart class not properly defined. Email sending aborted due to import issue.")
             return jsonify({'message': 'Email sending temporarily disabled due to server configuration issues.'}), 500

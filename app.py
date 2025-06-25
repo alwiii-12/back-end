@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart # FINAL CONFIRMED IMPORT FOR MIMEMULTIPART
+from email.mime.multipart import MIMEMultipart
 import os
 import json
 import logging
@@ -31,7 +31,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMEMultipart() # This should now be correctly defined
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -267,17 +267,16 @@ def send_alert():
         if not out_values:
             return jsonify({'status': 'no alerts sent'})
 
-        # Check if MIMEMultipart was successfully imported
-        # This check is now redundant if the top-level import is fixed, but adds robustness
-        if not isinstance(MIMEMultipart, type) or MIMEMultipart.__name__ != 'MIMEMultipart': # Safety check for dummy class
-            app.logger.error("MIMEMultipart class not properly defined. Email sending aborted due to import issue.")
-            return jsonify({'message': 'Email sending temporarily disabled due to server configuration issues.'}), 500
+        message_body = f"The following LINAC QA output values are out of tolerance (±2.0%):\\n\\n" # RE-ADDED: message_body construction
+        for val in out_values:
+            message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\\n"
+        message_body += f"\\nAlert from Hospital: {hospital_name}" # RE-ADDED: hospital_name to message_body
 
-        msg = MIMEMultipart()
+        msg = MIMEMultipart() # This should now be correctly defined
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'
-        msg.attach(MIMEText(message_body, 'plain'))
+        msg.attach(MIMEText(message_body, 'plain')) # Using the constructed message_body
 
         if APP_PASSWORD:
             server = smtplib.SMTP_SSL('smtp.gmail.com', 465)

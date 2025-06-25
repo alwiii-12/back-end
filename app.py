@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from email.mime.multipart import MIMEMultipart # CONFIRMED: Correct import for MIMEMultipart
 import os
 import json
 import logging
@@ -188,7 +188,6 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                # 'last_saved_at': firestore.FieldValue.server_timestamp() # Removed FieldValue (as per user request)
             },
             merge=True
         )
@@ -237,9 +236,6 @@ def get_data():
             # Extract main QA data
             data = data_from_db.get('data', [])
 
-            # REMOVED: last_saved_at extraction
-            # last_saved_timestamp = data_from_db.get('last_saved_at')
-
             for row in data:
                 energy = row.get('energy', '')
                 values = row.get('values', [])
@@ -248,7 +244,6 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            # REMOVED: last_saved_at from return
             return jsonify({'data': table}), 200
 
     except Exception as e:
@@ -267,16 +262,38 @@ def send_alert():
         if not out_values:
             return jsonify({'status': 'no alerts sent'})
 
-        message_body = f"The following LINAC QA output values are out of tolerance (±2.0%):\\n\\n" # RE-ADDED: message_body construction
-        for val in out_values:
-            message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\\n"
-        message_body += f"\\nAlert from Hospital: {hospital_name}" # RE-ADDED: hospital_name to message_body
+        message_body = f"""
+Dear LINAC QA User,
 
-        msg = MIMEMultipart() # This should now be correctly defined
+This is an automated alert from the LINAC QA System.
+
+Please review the following LINAC QA output values that are out of tolerance (±2.0%):
+
+--- Out of Tolerance Values ---
+"""
+        for val in out_values:
+            message_body += f"- Energy: {val['energy']}\n"
+            message_body += f"  Date: {val['date']}\n"
+            message_body += f"  Value: {val['value']}%\n"
+            message_body += f"-----------------------------\n" # Separator for each value
+
+        message_body += f"""
+Alert from Hospital: {hospital_name}
+
+Please log into the LINAC QA Portal for more details and to take necessary action.
+{/* Add login page URL here again if you want it in the alert email too */
+/* Login Page: https://front-endnew.onrender.com/login.html */
+}
+
+Sincerely,
+The LINAC QA Team
+"""
+
+        msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'
-        msg.attach(MIMEText(message_body, 'plain')) # Using the constructed message_body
+        msg.attach(MIMEText(message_body, 'plain'))
 
         if APP_PASSWORD:
             server = smtplib.SMTP_SSL('smtp.gmail.com', 465)

@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart # FIX: Ensure this is correctly imported
+from email.mime.multipart import MIMEMultipart
 import os
 import json
 import logging
@@ -11,7 +11,13 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from firebase_admin.firestore import FieldValue # Re-implemented: This line should now work correctly
+from datetime import datetime # Import datetime for persistent timestamp
+
+
+# Define get_server_timestamp to always use datetime.utcnow()
+# This bypasses the problematic FieldValue import entirely
+def get_server_timestamp():
+    return datetime.utcnow() # Use UTC datetime as the persistent timestamp
 
 
 app = Flask(__name__)
@@ -20,7 +26,7 @@ app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
@@ -32,7 +38,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMEMultipart() # This is where the NameError occurs if not imported
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -190,7 +196,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': firestore.FieldValue.server_timestamp() # Uses FieldValue from import
+                'last_saved_at': get_server_timestamp() # Uses the defined get_server_timestamp function
             },
             merge=True
         )
@@ -277,7 +283,7 @@ def send_alert():
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
-        msg = MIMEMultipart()
+        msg = MIMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'

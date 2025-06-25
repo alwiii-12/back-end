@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from email.mime.multipart import MIMEMultipart # FIX: Ensure this is correctly imported
 import os
 import json
 import logging
@@ -11,13 +11,7 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from datetime import datetime # Import datetime for persistent timestamp
-
-
-# Define get_server_timestamp to always use datetime.utcnow()
-# This bypasses the problematic FieldValue import entirely
-def get_server_timestamp():
-    return datetime.utcnow() # Use UTC datetime as the persistent timestamp
+from firebase_admin.firestore import FieldValue # Re-implemented: This line should now work correctly
 
 
 app = Flask(__name__)
@@ -38,7 +32,7 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMEMultipart()
+    msg = MIMEMultipart() # This is where the NameError occurs if not imported
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -196,7 +190,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': get_server_timestamp() # Uses the defined get_server_timestamp function
+                'last_saved_at': firestore.FieldValue.server_timestamp() # Uses FieldValue from import
             },
             merge=True
         )
@@ -248,7 +242,7 @@ def get_data():
             # Extract last_saved_at timestamp
             last_saved_timestamp = data_from_db.get('last_saved_at')
 
-            # Convert Python datetime to ISO format string with 'Z' for UTC
+            # Convert Python datetime to ISO format string with 'Z' for UTC if it's a datetime object
             if isinstance(last_saved_timestamp, datetime):
                 last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z' # Add Z for UTC
 
@@ -283,7 +277,7 @@ def send_alert():
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
-        msg = MIMultipart()
+        msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'
@@ -296,9 +290,8 @@ def send_alert():
             app.logger.info("📧 Alert email sent successfully.")
             return jsonify({'status': 'alert sent'}), 200
         else:
-            app.logger.warning(f"🚫 Email notification not sent to {user_email}: Missing email or APP_PASSWORD.")
-
-        return jsonify({'status': 'success', 'message': 'Alert processing complete.'}), 200
+            app.logger.warning(f"🚫 Email not sent: APP_PASSWORD not configured.")
+            return jsonify({'status': 'email not sent', 'message': 'APP_PASSWORD not configured'}), 500
 
     except Exception as e:
         app.logger.error("❌ Email error: %s", str(e), exc_info=True)

@@ -11,13 +11,13 @@ from calendar import monthrange
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from datetime import datetime # Import datetime for persistent timestamp
+# REMOVED: from firebase_admin.firestore import FieldValue (or google.cloud.firestore)
+# REMOVED: from datetime import datetime
 
 
-# Define get_server_timestamp to always use datetime.utcnow()
-# This bypasses the problematic FieldValue import entirely
-def get_server_timestamp():
-    return datetime.utcnow() # Use UTC datetime as the persistent timestamp
+# REMOVED: get_server_timestamp() function (as FieldValue import caused problems)
+# def get_server_timestamp():
+#     return datetime.utcnow()
 
 
 app = Flask(__name__)
@@ -26,19 +26,19 @@ app.logger.setLevel(logging.DEBUG)
 
 # === Email Config ===
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is for alerts, not notifications
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 if not APP_PASSWORD:
     app.logger.error("🔥 EMAIL_APP_PASSWORD environment variable not set.")
 
 
-# --- NEW: Helper function to send notification emails ---
+# --- Helper function to send notification emails (already present) ---
 def send_notification_email(recipient_email, subject, body):
     if not APP_PASSWORD:
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
 
-    msg = MIMEMultipart()
+    msg = MIMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
@@ -54,7 +54,7 @@ def send_notification_email(recipient_email, subject, body):
     except Exception as e:
         app.logger.error(f"❌ Failed to send notification email to {recipient_email}: {str(e)}", exc_info=True)
         return False
-# --- END NEW HELPER ---
+# --- END HELPER ---
 
 
 # === Firebase Init ===
@@ -196,7 +196,7 @@ def save_data():
         db.collection('linac_data').document(center_id).collection('months').document(month).set(
             {
                 'data': converted_data,
-                'last_saved_at': get_server_timestamp() # Uses the defined get_server_timestamp function
+                # REMOVED: 'last_saved_at': FieldValue.server_timestamp()
             },
             merge=True
         )
@@ -245,12 +245,11 @@ def get_data():
             # Extract main QA data
             data = data_from_db.get('data', [])
 
-            # Extract last_saved_at timestamp
-            last_saved_timestamp = data_from_db.get('last_saved_at')
-
-            # Convert Python datetime to ISO format string with 'Z' for UTC if it's a datetime object
-            if isinstance(last_saved_timestamp, datetime):
-                last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z' # Add Z for UTC
+            # REMOVED: last_saved_at extraction
+            # last_saved_timestamp = data_from_db.get('last_saved_at')
+            # REMOVED: datetime conversion
+            # if isinstance(last_saved_timestamp, datetime):
+            #     last_saved_timestamp = last_saved_timestamp.isoformat() + 'Z'
 
             for row in data:
                 energy = row.get('energy', '')
@@ -260,7 +259,8 @@ def get_data():
 
             table = [[energy] + energy_dict[energy] for energy in ENERGY_TYPES]
             
-            return jsonify({'data': table, 'last_saved_at': last_saved_timestamp}), 200
+            # REMOVED: last_saved_at from return
+            return jsonify({'data': table}), 200
 
     except Exception as e:
         app.logger.error("❌ Load failed: %s", str(e), exc_info=True)
@@ -283,7 +283,7 @@ def send_alert():
         for val in out_values:
             message_body += f"Energy: {val['energy']}, Date: {val['date']}, Value: {val['value']}%\n"
 
-        msg = MIMEMultipart()
+        msg = MIMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = f'⚠ LINAC QA Output Failed Alert - {hospital_name}'

@@ -275,19 +275,14 @@ Please review the following LINAC QA output values that are out of tolerance (±
             message_body += f"- Energy: {val['energy']}\n"
             message_body += f"  Date: {val['date']}\n"
             message_body += f"  Value: {val['value']}%\n"
-            message_body += f"-----------------------------\n" # Separator for each value
+            message_body += f"-----------------------------\n"
 
         message_body += f"""
 Alert from Hospital: {hospital_name}
 
 Please log into the LINAC QA Portal for more details and to take necessary action.
-{/* Add login page URL here again if you want it in the alert email too */
-/* Login Page: https://front-endnew.onrender.com/login.html */
-}
-
-Sincerely,
-The LINAC QA Team
-"""
+Login Page: https://front-endnew.onrender.com/login.html
+""" # Removed /* */ comments directly inside f-string
 
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL

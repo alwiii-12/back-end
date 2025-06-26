@@ -316,13 +316,17 @@ def query_qa_data():
                 for i, value in enumerate(values):
                     try:
                         n = float(value)
-                        if abs(n) > 2.0:
-                            if i < len(date_strings):
-                                out_dates.add(date_strings[i])
-                    except (ValueError, TypeError):
-                        pass
+                        # Check if value is out of tolerance (using existing logic from frontend/email alert)
+                        if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
+                                # Add the date to the set
+                                if i < len(date_strings): # Ensure index is valid
+                                    out_dates.add(date_strings[i])
+                        except (ValueError, TypeError):
+                            # Ignore non-numeric values
+                            pass
             
-            sorted_out_dates = sorted(list(out_dates))
+            sorted_out_dates = sorted(list(out_dates)) # Sort dates chronologically
+
             return jsonify({'status': 'success', 'dates': sorted_out_dates}), 200
 
         elif query_type == "energy_data_for_month":
@@ -355,45 +359,50 @@ def query_qa_data():
             if not energy_type or not date_param:
                 return jsonify({'status': 'error', 'message': 'Missing energy_type or date for this query'}), 400
 
+            # Validate and parse date_param to get the day index
+            # Date format is YYYY-MM-DD
             try:
-                # Validate and parse date_param to get the day index
-                # Date format is YYYY-MM-DD
-                year_check, month_check, day_check = map(int, date_param.split('-'))
-                if year_check != int(month_param.split('-')[0]) or month_check != int(month_param.split('-')[1]):
+                # First, extract year and month from date_param to ensure it matches month_param
+                parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
+                if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
                     return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year.'}), 400
                 
-                day_index = day_check - 1 # Convert day (1-based) to index (0-based)
+                day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
-                found_value = None
-                found_status = "N/A"
+            except ValueError:
+                return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD.'}), 400
 
-                for row in data_rows:
-                    if row.get("energy") == energy_type:
-                        values = row.get("values", [])
-                        if day_index < len(values):
-                            found_value = values[day_index]
-                            try:
-                                n = float(found_value)
-                                if abs(n) <= 1.8:
-                                    found_status = "Within Tolerance"
-                                elif abs(n) <= 2.0:
-                                    found_status = "Warning"
-                                else:
-                                    found_status = "Out of Tolerance"
-                            except (ValueError, TypeError):
-                                found_status = "Not a number"
-                        break
-                
-                if found_value is not None:
-                    return jsonify({
-                        'status': 'success',
-                        'energy_type': energy_type,
-                        'date': date_param,
-                        'value': found_value,
-                        'data_status': found_status
-                    }), 200
-                else:
-                    return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
+
+            found_value = None
+            found_status = "N/A"
+
+            for row in data_rows:
+                if row.get("energy") == energy_type:
+                    values = row.get("values", [])
+                    if day_index < len(values): # Ensure day_index is within the bounds of collected values
+                        found_value = values[day_index]
+                        try:
+                            n = float(found_value)
+                            if abs(n) <= 1.8:
+                                found_status = "Within Tolerance"
+                            elif abs(n) <= 2.0:
+                                found_status = "Warning"
+                            else:
+                                found_status = "Out of Tolerance"
+                        except (ValueError, TypeError):
+                            found_status = "Not a number"
+                    break
+            
+            if found_value is not None:
+                return jsonify({
+                    'status': 'success',
+                    'energy_type': energy_type,
+                    'date': date_param,
+                    'value': found_value,
+                    'data_status': found_status
+                }), 200
+            else:
+                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
 
         elif query_type == "warning_values_for_month":
             year, mon = map(int, month_param.split("-"))
@@ -417,7 +426,6 @@ def query_qa_data():
                     except (ValueError, TypeError):
                         pass
             
-            # Sort warning entries for consistent output
             sorted_warning_entries = sorted(warning_entries, key=lambda x: (x['date'], x['energy']))
 
             return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries}), 200

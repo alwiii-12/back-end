@@ -8,6 +8,7 @@ import os
 import json
 import logging
 from calendar import monthrange
+from datetime import datetime # Import datetime for date parsing
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -279,6 +280,10 @@ def query_qa_data():
         query_type = content.get("query")
         month_param = content.get("month")
         uid = content.get("uid")
+        
+        # Additional parameters for specific queries
+        energy_type = content.get("energy_type")
+        date_param = content.get("date") # Expected format: YYYY-MM-DD
 
         if not query_type or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400
@@ -292,38 +297,132 @@ def query_qa_data():
         if not center_id:
             return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
 
-        # Implement specific query logic based on query_type
+        # Fetch data from Firestore for the specified month and user
+        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+        data_rows = []
+        if doc.exists:
+            data_rows = doc.to_dict().get("data", [])
+
+        # --- Query Logic ---
         if query_type == "out_of_tolerance_dates":
-            # Fetch data for the specified month and user (similar to get_data)
             year, mon = map(int, month_param.split("-"))
             _, num_days = monthrange(year, mon)
-            
-            # Reconstruct date strings for the month to match out_values format
             date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-
-            doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
             
-            out_dates = set() # Use a set to store unique dates
-            if doc.exists:
-                data_rows = doc.to_dict().get("data", [])
-                for row in data_rows:
-                    energy_type = row.get("energy")
-                    values = row.get("values", [])
-                    for i, value in enumerate(values):
-                        try:
-                            n = float(value)
-                            # Check if value is out of tolerance (using existing logic from frontend/email alert)
-                            if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
-                                # Add the date to the set
-                                if i < len(date_strings): # Ensure index is valid
-                                    out_dates.add(date_strings[i])
-                        except (ValueError, TypeError):
-                            # Ignore non-numeric values
-                            pass
+            out_dates = set()
+            for row in data_rows:
+                energy_type_row = row.get("energy")
+                values = row.get("values", [])
+                for i, value in enumerate(values):
+                    try:
+                        n = float(value)
+                        if abs(n) > 2.0:
+                            if i < len(date_strings):
+                                out_dates.add(date_strings[i])
+                    except (ValueError, TypeError):
+                        pass
             
-            sorted_out_dates = sorted(list(out_dates)) # Sort dates chronologically
-
+            sorted_out_dates = sorted(list(out_dates))
             return jsonify({'status': 'success', 'dates': sorted_out_dates}), 200
+
+        elif query_type == "energy_data_for_month":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'Missing energy_type for this query'}), 400
+            
+            found_row = None
+            for row in data_rows:
+                if row.get("energy") == energy_type:
+                    found_row = row
+                    break
+            
+            if found_row:
+                year, mon = map(int, month_param.split("-"))
+                _, num_days = monthrange(year, mon)
+                dates = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
+                
+                # Format data as a list of dictionaries for easier consumption
+                formatted_data = []
+                values = found_row.get("values", [])
+                for i, val in enumerate(values):
+                    if i < len(dates):
+                        formatted_data.append({"date": dates[i], "value": val})
+
+                return jsonify({'status': 'success', 'energy_type': energy_type, 'data': formatted_data}), 200
+            else:
+                return jsonify({'status': 'success', 'energy_type': energy_type, 'data': [], 'message': f"No data found for {energy_type} this month."}), 200
+
+        elif query_type == "value_on_date":
+            if not energy_type or not date_param:
+                return jsonify({'status': 'error', 'message': 'Missing energy_type or date for this query'}), 400
+
+            try:
+                # Validate and parse date_param to get the day index
+                # Date format is YYYY-MM-DD
+                year_check, month_check, day_check = map(int, date_param.split('-'))
+                if year_check != int(month_param.split('-')[0]) or month_check != int(month_param.split('-')[1]):
+                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year.'}), 400
+                
+                day_index = day_check - 1 # Convert day (1-based) to index (0-based)
+
+                found_value = None
+                found_status = "N/A"
+
+                for row in data_rows:
+                    if row.get("energy") == energy_type:
+                        values = row.get("values", [])
+                        if day_index < len(values):
+                            found_value = values[day_index]
+                            try:
+                                n = float(found_value)
+                                if abs(n) <= 1.8:
+                                    found_status = "Within Tolerance"
+                                elif abs(n) <= 2.0:
+                                    found_status = "Warning"
+                                else:
+                                    found_status = "Out of Tolerance"
+                            except (ValueError, TypeError):
+                                found_status = "Not a number"
+                        break
+                
+                if found_value is not None:
+                    return jsonify({
+                        'status': 'success',
+                        'energy_type': energy_type,
+                        'date': date_param,
+                        'value': found_value,
+                        'data_status': found_status
+                    }), 200
+                else:
+                    return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
+
+        elif query_type == "warning_values_for_month":
+            year, mon = map(int, month_param.split("-"))
+            _, num_days = monthrange(year, mon)
+            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
+            
+            warning_entries = []
+            for row in data_rows:
+                energy_type_row = row.get("energy")
+                values = row.get("values", [])
+                for i, value in enumerate(values):
+                    try:
+                        n = float(value)
+                        if abs(n) > 1.8 and abs(n) <= 2.0: # 'Warning' range
+                            if i < len(date_strings):
+                                warning_entries.append({
+                                    "energy": energy_type_row,
+                                    "date": date_strings[i],
+                                    "value": n
+                                })
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Sort warning entries for consistent output
+            sorted_warning_entries = sorted(warning_entries, key=lambda x: (x['date'], x['energy']))
+
+            return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries}), 200
+
+
         else:
             return jsonify({'status': 'error', 'message': 'Unknown query type'}), 400
 

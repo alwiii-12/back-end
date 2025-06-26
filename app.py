@@ -183,10 +183,6 @@ def get_data():
 # --- ALERT EMAIL ---
 @app.route('/send-alert', methods=['POST'])
 async def send_alert():
-    # Initialize month_alerts_doc_ref to None outside try/except or conditional blocks
-    # so it's always defined before the finally block or external use.
-    # However, in this case, the `set` call is inside `if APP_PASSWORD:`,
-    # so we need to ensure it's defined *before* that `if` block.
     month_alerts_doc_ref = None # Initialize to None
 
     try:
@@ -211,9 +207,7 @@ async def send_alert():
             app.logger.warning(f"Center ID not found for user {uid} during alert processing.")
             return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
 
-        # Define month_alerts_doc_ref here to ensure it's always in scope
-        # This line should now be outside any conditional returns based on input validation
-        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}") #
+        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}")
         app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
 
         alerts_doc_snap = month_alerts_doc_ref.get()
@@ -266,10 +260,7 @@ async def send_alert():
             server.quit()
             app.logger.info(f"Email alert sent to {RECEIVER_EMAIL} for {hospital} ({month_key}).")
 
-            # This line is where the error occurred previously.
-            # By moving the definition of `month_alerts_doc_ref` earlier,
-            # it should now always be defined when this line is reached.
-            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False) #
+            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
             app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
 
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
@@ -278,9 +269,68 @@ async def send_alert():
             return jsonify({'status': 'email not sent', 'message': 'Email credentials missing'}), 500
     except Exception as e:
         app.logger.error(f"Error sending alert: {str(e)}", exc_info=True)
-        # The `month_alerts_doc_ref` variable should now be defined even if an exception occurs
-        # within the try block after its definition.
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- NEW: Chatbot Query Endpoint ---
+@app.route('/query-qa-data', methods=['POST'])
+def query_qa_data():
+    try:
+        content = request.get_json(force=True)
+        query_type = content.get("query")
+        month_param = content.get("month")
+        uid = content.get("uid")
+
+        if not query_type or not month_param or not uid:
+            return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+
+        if not center_id:
+            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
+
+        # Implement specific query logic based on query_type
+        if query_type == "out_of_tolerance_dates":
+            # Fetch data for the specified month and user (similar to get_data)
+            year, mon = map(int, month_param.split("-"))
+            _, num_days = monthrange(year, mon)
+            
+            # Reconstruct date strings for the month to match out_values format
+            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
+
+            doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+            
+            out_dates = set() # Use a set to store unique dates
+            if doc.exists:
+                data_rows = doc.to_dict().get("data", [])
+                for row in data_rows:
+                    energy_type = row.get("energy")
+                    values = row.get("values", [])
+                    for i, value in enumerate(values):
+                        try:
+                            n = float(value)
+                            # Check if value is out of tolerance (using existing logic from frontend/email alert)
+                            if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
+                                # Add the date to the set
+                                if i < len(date_strings): # Ensure index is valid
+                                    out_dates.add(date_strings[i])
+                        except (ValueError, TypeError):
+                            # Ignore non-numeric values
+                            pass
+            
+            sorted_out_dates = sorted(list(out_dates)) # Sort dates chronologically
+
+            return jsonify({'status': 'success', 'dates': sorted_out_dates}), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Unknown query type'}), 400
+
+    except Exception as e:
+        app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 # --- ADMIN: GET PENDING USERS ---
 @app.route('/admin/pending-users', methods=['GET'])

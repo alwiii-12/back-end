@@ -182,13 +182,13 @@ def get_data():
 
 # --- ALERT EMAIL ---
 @app.route('/send-alert', methods=['POST'])
-async def send_alert(): # Made async to match verify_admin_token in other routes, though not strictly needed here
+async def send_alert():
     try:
         content = request.get_json(force=True)
-        current_out_values = content.get("outValues", []) # These are ALL current out-of-tolerance values from frontend
+        current_out_values = content.get("outValues", [])
         hospital = content.get("hospitalName", "Unknown")
-        uid = content.get("uid") # Expect UID from frontend
-        month_key = content.get("month") # Expect month from frontend (e.g., "2025-06")
+        uid = content.get("uid")
+        month_key = content.get("month")
 
         if not current_out_values and not (uid and month_key):
             app.logger.info("No current out-of-tolerance values, UID, or month key to consider for alert.")
@@ -208,12 +208,10 @@ async def send_alert(): # Made async to match verify_admin_token in other routes
             app.logger.warning(f"Center ID not found for user {uid} during alert processing.")
             return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
 
-        # Construct the Firestore path for this month's alerts for this center
-        center_alerts_doc_ref = db.collection("linac_alerts").document(center_id)
-        month_alerts_doc_ref = center_alerts_doc_ref.collection("months").document(f"Month_{month_key}")
-        app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
+        alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}")
+        app.logger.debug(f"Firestore alerts path: {alerts_doc_ref.path}")
 
-        alerts_doc_snap = month_alerts_doc_ref.get()
+        alerts_doc_snap = alerts_doc_ref.get()
         previously_alerted = []
 
         if alerts_doc_snap.exists:
@@ -222,11 +220,9 @@ async def send_alert(): # Made async to match verify_admin_token in other routes
         else:
             app.logger.debug(f"No existing alert record for {center_id}/{month_key}. This might be the first alert for this month.")
 
-        # For comparison, convert lists of dicts to sets of sorted JSON strings
         previously_alerted_strings = set(json.dumps(val, sort_keys=True) for val in previously_alerted)
         current_out_values_strings = set(json.dumps(val, sort_keys=True) for val in current_out_values)
 
-        # Determine if an email actually needs to be sent based on changes
         send_email_needed = False
 
         if current_out_values_strings != previously_alerted_strings:
@@ -255,7 +251,7 @@ async def send_alert(): # Made async to match verify_admin_token in other routes
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
-        msg['Subject'] = f"LINAC QA Status - {hospital} ({month_key})"
+        msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})" #
         msg.attach(MIMEText(message_body, 'plain'))
 
         if APP_PASSWORD:
@@ -265,7 +261,6 @@ async def send_alert(): # Made async to match verify_admin_token in other routes
             server.quit()
             app.logger.info(f"Email alert sent to {RECEIVER_EMAIL} for {hospital} ({month_key}).")
 
-            # --- Update Firestore with the currently alerted values ---
             month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
             app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
 

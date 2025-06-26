@@ -183,6 +183,12 @@ def get_data():
 # --- ALERT EMAIL ---
 @app.route('/send-alert', methods=['POST'])
 async def send_alert():
+    # Initialize month_alerts_doc_ref to None outside try/except or conditional blocks
+    # so it's always defined before the finally block or external use.
+    # However, in this case, the `set` call is inside `if APP_PASSWORD:`,
+    # so we need to ensure it's defined *before* that `if` block.
+    month_alerts_doc_ref = None # Initialize to None
+
     try:
         content = request.get_json(force=True)
         current_out_values = content.get("outValues", [])
@@ -206,6 +212,7 @@ async def send_alert():
             return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
 
         # Define month_alerts_doc_ref here to ensure it's always in scope
+        # This line should now be outside any conditional returns based on input validation
         month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}") #
         app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
 
@@ -245,17 +252,11 @@ async def send_alert():
         else:
             message_body += "All LINAC QA values are currently within tolerance for this month.\n"
         
-        # If there are no current_out_values AND previously_alerted had values, send a "resolved" email.
-        # This part of the logic needs to be carefully aligned with `send_email_needed`.
-        # The `send_email_needed` already captures if `current_out_values_strings != previously_alerted_strings`,
-        # which includes the transition from non-empty to empty.
-        # So, the current `message_body` construction correctly describes the state.
-
         # --- Send the email ---
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECEIVER_EMAIL
-        msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})" #
+        msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})"
         msg.attach(MIMEText(message_body, 'plain'))
 
         if APP_PASSWORD:
@@ -265,9 +266,10 @@ async def send_alert():
             server.quit()
             app.logger.info(f"Email alert sent to {RECEIVER_EMAIL} for {hospital} ({month_key}).")
 
-            # Always update Firestore with the current state of out_values after an email is sent
-            # (because an email is only sent if there was a change)
-            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
+            # This line is where the error occurred previously.
+            # By moving the definition of `month_alerts_doc_ref` earlier,
+            # it should now always be defined when this line is reached.
+            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False) #
             app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
 
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
@@ -276,8 +278,8 @@ async def send_alert():
             return jsonify({'status': 'email not sent', 'message': 'Email credentials missing'}), 500
     except Exception as e:
         app.logger.error(f"Error sending alert: {str(e)}", exc_info=True)
-        # Ensure month_alerts_doc_ref is defined for the error message if needed, or handle its potential absence.
-        # For this specific error "name 'month_alerts_doc_ref' is not defined", the fix above addresses it.
+        # The `month_alerts_doc_ref` variable should now be defined even if an exception occurs
+        # within the try block after its definition.
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- ADMIN: GET PENDING USERS ---

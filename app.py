@@ -316,16 +316,13 @@ def query_qa_data():
                 for i, value in enumerate(values):
                     try:
                         n = float(value)
-                        # Check if value is out of tolerance (using existing logic from frontend/email alert)
                         if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
-                                # Add the date to the set
                                 if i < len(date_strings): # Ensure index is valid
                                     out_dates.add(date_strings[i])
-                        except (ValueError, TypeError):
-                            # Ignore non-numeric values
-                            pass
+                    except (ValueError, TypeError):
+                        pass
             
-            sorted_out_dates = sorted(list(out_dates)) # Sort dates chronologically
+            sorted_out_dates = sorted(list(out_dates))
 
             return jsonify({'status': 'success', 'dates': sorted_out_dates}), 200
 
@@ -360,9 +357,7 @@ def query_qa_data():
                 return jsonify({'status': 'error', 'message': 'Missing energy_type or date for this query'}), 400
 
             # Validate and parse date_param to get the day index
-            # Date format is YYYY-MM-DD
             try:
-                # First, extract year and month from date_param to ensure it matches month_param
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
                     return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year.'}), 400

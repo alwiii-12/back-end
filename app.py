@@ -190,11 +190,8 @@ async def send_alert():
         uid = content.get("uid")
         month_key = content.get("month")
 
-        if not current_out_values and not (uid and month_key):
-            app.logger.info("No current out-of-tolerance values, UID, or month key to consider for alert.")
-            return jsonify({'status': 'no alerts to send'})
-
         if not uid or not month_key:
+            app.logger.warning("Missing UID or month key for alert processing.")
             return jsonify({'status': 'error', 'message': 'Missing UID or month for alert processing'}), 400
 
         user_doc = db.collection('users').document(uid).get()
@@ -208,10 +205,11 @@ async def send_alert():
             app.logger.warning(f"Center ID not found for user {uid} during alert processing.")
             return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
 
-        alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}")
-        app.logger.debug(f"Firestore alerts path: {alerts_doc_ref.path}")
+        # Define month_alerts_doc_ref here to ensure it's always in scope
+        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}") #
+        app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
 
-        alerts_doc_snap = alerts_doc_ref.get()
+        alerts_doc_snap = month_alerts_doc_ref.get()
         previously_alerted = []
 
         if alerts_doc_snap.exists:
@@ -246,6 +244,12 @@ async def send_alert():
             message_body += "All previously detected LINAC QA issues for this month are now resolved.\n"
         else:
             message_body += "All LINAC QA values are currently within tolerance for this month.\n"
+        
+        # If there are no current_out_values AND previously_alerted had values, send a "resolved" email.
+        # This part of the logic needs to be carefully aligned with `send_email_needed`.
+        # The `send_email_needed` already captures if `current_out_values_strings != previously_alerted_strings`,
+        # which includes the transition from non-empty to empty.
+        # So, the current `message_body` construction correctly describes the state.
 
         # --- Send the email ---
         msg = MIMEMultipart()
@@ -261,6 +265,8 @@ async def send_alert():
             server.quit()
             app.logger.info(f"Email alert sent to {RECEIVER_EMAIL} for {hospital} ({month_key}).")
 
+            # Always update Firestore with the current state of out_values after an email is sent
+            # (because an email is only sent if there was a change)
             month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
             app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
 
@@ -270,6 +276,8 @@ async def send_alert():
             return jsonify({'status': 'email not sent', 'message': 'Email credentials missing'}), 500
     except Exception as e:
         app.logger.error(f"Error sending alert: {str(e)}", exc_info=True)
+        # Ensure month_alerts_doc_ref is defined for the error message if needed, or handle its potential absence.
+        # For this specific error "name 'month_alerts_doc_ref' is not defined", the fix above addresses it.
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- ADMIN: GET PENDING USERS ---

@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime
+from datetime import datetime # Import datetime for date parsing
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -18,9 +18,9 @@ app.logger.setLevel(logging.DEBUG)
 
 # --- [EMAIL CONFIG] ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-# RECEIVER_EMAIL will now primarily be used for other admin notifications, not all QA alerts
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is the fallback for admin emails, not QA alerts to RSO
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
+TEST_EMAIL_RECIPIENT = 'alwinjose812@gmail.com' # Set specific email for health checks
 
 # --- [EMAIL SENDER FUNCTION] ---
 def send_notification_email(recipient_email, subject, body):
@@ -269,7 +269,6 @@ async def send_alert():
         # --- Send the email ---
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
-        # MODIFIED: Send to RSO emails
         msg['To'] = ", ".join(rso_emails) # Join emails with comma for 'To' field
         msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})"
         msg.attach(MIMEText(message_body, 'plain'))
@@ -310,198 +309,4 @@ def query_qa_data():
         
         # Additional parameters for specific queries
         energy_type = content.get("energy_type")
-        date_param = content.get("date") # Expected format: YYYY-MM-DD
-
-        if not query_type or not month_param or not uid:
-            return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        user_data = user_doc.to_dict()
-        center_id = user_data.get("centerId")
-
-        if not center_id:
-            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
-
-        # Fetch data from Firestore for the specified month and user
-        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
-        data_rows = []
-        if doc.exists:
-            data_rows = doc.to_dict().get("data", [])
-
-        # --- Query Logic ---
-        if query_type == "out_of_tolerance_dates":
-            year, mon = map(int, month_param.split("-"))
-            _, num_days = monthrange(year, mon)
-            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-            
-            out_dates = set()
-            for row in data_rows:
-                energy_type_row = row.get("energy")
-                values = row.get("values", [])
-                for i, value in enumerate(values):
-                    try:
-                        n = float(value)
-                        if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
-                                if i < len(date_strings): # Ensure index is valid
-                                    out_dates.add(date_strings[i])
-                    except (ValueError, TypeError):
-                        pass
-            
-            sorted_out_dates = sorted(list(out_dates))
-
-            return jsonify({'status': 'success', 'dates': sorted_out_dates}), 200
-
-        elif query_type == "energy_data_for_month":
-            if not energy_type:
-                return jsonify({'status': 'error', 'message': 'Missing energy_type for this query'}), 400
-            
-            found_row = None
-            for row in data_rows:
-                if row.get("energy") == energy_type:
-                    found_row = row
-                    break
-            
-            if found_row:
-                year, mon = map(int, month_param.split("-"))
-                _, num_days = monthrange(year, mon)
-                dates = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-                
-                # Format data as a list of dictionaries for easier consumption
-                formatted_data = []
-                values = found_row.get("values", [])
-                for i, val in enumerate(values):
-                    if i < len(dates):
-                        formatted_data.append({"date": dates[i], "value": val})
-
-                return jsonify({'status': 'success', 'energy_type': energy_type, 'data': formatted_data}), 200
-            else:
-                return jsonify({'status': 'success', 'energy_type': energy_type, 'data': [], 'message': f"No data found for {energy_type} this month."}), 200
-
-        elif query_type == "value_on_date":
-            if not energy_type or not date_param:
-                return jsonify({'status': 'error', 'message': 'Missing energy_type or date for this query'}), 400
-
-            # Validate and parse date_param to get the day index
-            try:
-                parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
-                if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year.'}), 400
-                
-                day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
-
-            except ValueError:
-                return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD.'}), 400
-
-
-            found_value = None
-            found_status = "N/A"
-
-            for row in data_rows:
-                if row.get("energy") == energy_type:
-                    values = row.get("values", [])
-                    if day_index < len(values): # Ensure day_index is within the bounds of collected values
-                        found_value = values[day_index]
-                        try:
-                            n = float(found_value)
-                            if abs(n) <= 1.8:
-                                found_status = "Within Tolerance"
-                            elif abs(n) <= 2.0:
-                                found_status = "Warning"
-                            else:
-                                found_status = "Out of Tolerance"
-                        except (ValueError, TypeError):
-                            found_status = "Not a number"
-                    break
-            
-            if found_value is not None:
-                return jsonify({
-                    'status': 'success',
-                    'energy_type': energy_type,
-                    'date': date_param,
-                    'value': found_value,
-                    'data_status': found_status
-                }), 200
-            else:
-                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
-
-        elif query_type == "warning_values_for_month":
-            year, mon = map(int, month_param.split("-"))
-            _, num_days = monthrange(year, mon)
-            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-            
-            warning_entries = []
-            for row in data_rows:
-                energy_type_row = row.get("energy")
-                values = row.get("values", [])
-                for i, value in enumerate(values):
-                    try:
-                        n = float(value)
-                        if abs(n) > 1.8 and abs(n) <= 2.0: # 'Warning' range
-                            if i < len(date_strings):
-                                warning_entries.append({
-                                    "energy": energy_type_row,
-                                    "date": date_strings[i],
-                                    "value": n
-                                })
-                    except (ValueError, TypeError):
-                        pass
-            
-            sorted_warning_entries = sorted(warning_entries, key=lambda x: (x['date'], x['energy']))
-
-            return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries}), 200
-
-
-        else:
-            return jsonify({'status': 'error', 'message': 'Unknown query type'}), 400
-
-    except Exception as e:
-        app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-# --- ADMIN: GET PENDING USERS ---
-@app.route('/admin/pending-users', methods=['GET'])
-async def get_pending_users():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-    try:
-        users = db.collection("users").where("status", "==", "pending").stream()
-        return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
-    except Exception as e:
-        return jsonify({'message': str(e)}), 500
-
-# --- ADMIN: UPDATE USER STATUS ---
-@app.route('/admin/update-user-status', methods=['POST'])
-async def update_user_status():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid = await verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-    try:
-        content = request.get_json(force=True)
-        uid = content.get("uid")
-        status = content.get("status")
-        if not uid or status not in ["active", "rejected"]:
-            return jsonify({'message': 'Invalid input'}), 400
-        ref = db.collection("users").document(uid)
-        ref.update({"status": status})
-        data = ref.get().to_dict()
-        if APP_PASSWORD and data.get("email"):
-            msg = "Your LINAC QA account has been " + ("approved." if status == "active" else "rejected.")
-            send_notification_email(data["email"], "LINAC QA Status Update", msg)
-        return jsonify({'status': 'success'}), 200
-    except Exception as e:
-        return jsonify({'message': str(e)}), 500
-
-# --- INDEX ---
-@app.route('/')
-def index():
-    return "✅ LINAC QA Backend Running"
-
-# --- RUN ---
-if __name__ == '__main__':
-    app.run(debug=True)
+        date_param = content.get("date") # Expected format:

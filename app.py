@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime # Import datetime for date parsing (removed duplicate)
+from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -18,9 +18,9 @@ app.logger.setLevel(logging.DEBUG)
 
 # --- [EMAIL CONFIG] ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is the fallback for admin emails, not QA alerts to RSO
+# RECEIVER_EMAIL will now primarily be used for other admin notifications, not all QA alerts
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
-TEST_EMAIL_RECIPIENT = 'alwinjose812@gmail.com' # Set specific email for health checks (removed duplicate)
 
 # --- [EMAIL SENDER FUNCTION] ---
 def send_notification_email(recipient_email, subject, body):
@@ -29,7 +29,8 @@ def send_notification_email(recipient_email, subject, body):
         return False
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
-    msg['To'] = recipient_email # Handles both single email string and comma-separated string
+    # Handles both single email string and comma-separated string
+    msg['To'] = recipient_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
     try:
@@ -268,6 +269,7 @@ async def send_alert():
         # --- Send the email ---
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
+        # MODIFIED: Send to RSO emails
         msg['To'] = ", ".join(rso_emails) # Join emails with comma for 'To' field
         msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})"
         msg.attach(MIMEText(message_body, 'plain'))
@@ -308,9 +310,7 @@ def query_qa_data():
         
         # Additional parameters for specific queries
         energy_type = content.get("energy_type")
-        # Corrected: Only one date_param assignment, and comment is now on its own line
-        date_param = content.get("date") 
-        # Expected format:YYYY-MM-DD
+        date_param = content.get("date") # Expected format: YYYY-MM-DD
 
         if not query_type or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400
@@ -392,7 +392,7 @@ def query_qa_data():
                 day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
             except ValueError:
-                return jsonify({'status': 'error', 'message': 'Invalid date format. Please use ISO format YYYY-MM-DD.'}), 400
+                return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD.'}), 400
 
 
             found_value = None

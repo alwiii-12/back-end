@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime # Import datetime for date parsing (removed duplicate)
+from datetime import datetime # Import datetime for date parsing (removed duplicate entry)
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -50,7 +50,7 @@ if not firebase_json:
     raise Exception("FIREBASE_CREDENTIALS not set")
 firebase_dict = json.loads(firebase_json)
 cred = credentials.Certificate(firebase_dict)
-firebase_admin.initialize_app(cred)
+firebase_admin.initializeApp(cred)
 db = firestore.client()
 
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
@@ -309,8 +309,7 @@ def query_qa_data():
         
         # Additional parameters for specific queries
         energy_type = content.get("energy_type")
-        # Corrected: Remove duplicate line and ensure comment is clear
-        date_param = content.get("date") # Expected format: YYYY-MM-DD
+        date_param = content.get("date") # Expected format: YYYY-MM-DD # Corrected comment placement and removed duplication
 
         if not query_type or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400

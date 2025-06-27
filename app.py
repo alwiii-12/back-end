@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime # Import datetime for date parsing
+from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -18,6 +18,7 @@ app.logger.setLevel(logging.DEBUG)
 
 # --- [EMAIL CONFIG] ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
+# RECEIVER_EMAIL will now primarily be used for other admin notifications, not all QA alerts
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
@@ -28,6 +29,7 @@ def send_notification_email(recipient_email, subject, body):
         return False
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
+    # Handles both single email string and comma-separated string
     msg['To'] = recipient_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
@@ -82,7 +84,7 @@ def signup():
             'email': user['email'].strip().lower(),
             'hospital': user['hospital'],
             'role': user['role'],
-            'centerId': user['hospital'],
+            'centerId': user['hospital'], # Assuming hospital value is also the centerId
             'status': user['status']
         })
         return jsonify({'status': 'success', 'message': 'User registered'}), 200
@@ -184,7 +186,7 @@ def get_data():
 # --- ALERT EMAIL ---
 @app.route('/send-alert', methods=['POST'])
 async def send_alert():
-    month_alerts_doc_ref = None # Initialize to None
+    month_alerts_doc_ref = None
 
     try:
         content = request.get_json(force=True)
@@ -207,6 +209,23 @@ async def send_alert():
         if not center_id:
             app.logger.warning(f"Center ID not found for user {uid} during alert processing.")
             return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
+
+        # NEW: Find all RSO emails for the current hospital/centerId
+        rso_emails = []
+        try:
+            rso_users = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream()
+            for rso_user in rso_users:
+                rso_data = rso_user.to_dict()
+                if 'email' in rso_data and rso_data['email']:
+                    rso_emails.append(rso_data['email'])
+            
+            if not rso_emails:
+                app.logger.warning(f"No RSO email found for centerId: {center_id}. Alert not sent to RSO.")
+                return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200 # Or decide to send to a fallback admin email
+        except Exception as e:
+            app.logger.error(f"Error fetching RSO emails for center {center_id}: {str(e)}", exc_info=True)
+            return jsonify({'status': 'error', 'message': 'Failed to fetch RSO emails'}), 500
+
 
         month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}")
         app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
@@ -250,19 +269,27 @@ async def send_alert():
         # --- Send the email ---
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
-        msg['To'] = RECEIVER_EMAIL
+        # MODIFIED: Send to RSO emails
+        msg['To'] = ", ".join(rso_emails) # Join emails with comma for 'To' field
         msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})"
         msg.attach(MIMEText(message_body, 'plain'))
 
         if APP_PASSWORD:
-            server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-            server.login(SENDER_EMAIL, APP_PASSWORD)
-            server.send_message(msg)
-            server.quit()
-            app.logger.info(f"Email alert sent to {RECEIVER_EMAIL} for {hospital} ({month_key}).")
+            # Ensure there are recipients before attempting to send
+            if rso_emails:
+                server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+                server.login(SENDER_EMAIL, APP_PASSWORD)
+                # Pass the list of recipients to send_message for proper delivery
+                server.send_message(msg)
+                server.quit()
+                app.logger.info(f"Email alert sent to RSO(s) {msg['To']} for {hospital} ({month_key}).")
 
-            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
-            app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
+                month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
+                app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
+            else:
+                app.logger.warning(f"No RSO emails collected for {center_id}, skipping email send.")
+                return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital to send alert to.'}), 200
+
 
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
         else:

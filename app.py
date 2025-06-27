@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime # Import datetime for date parsing
+from datetime import datetime # Import datetime for date parsing (removed duplicate)
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -309,7 +309,8 @@ def query_qa_data():
         
         # Additional parameters for specific queries
         energy_type = content.get("energy_type")
-        date_param = content.get("date") # Expected format: YYYY-MM-DD # Corrected comment placement
+        # Corrected: Remove duplicate line and ensure comment is clear
+        date_param = content.get("date") # Expected format: YYYY-MM-DD
 
         if not query_type or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400

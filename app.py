@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime # Import datetime for date parsing
+from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -20,7 +20,7 @@ app.logger.setLevel(logging.DEBUG)
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This is the fallback for admin emails, not QA alerts to RSO
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
-TEST_EMAIL_RECIPIENT = 'alwinjose812@gmail.com' # Set specific email for health checks
+TEST_EMAIL_RECIPIENT = 'alwinjose812@gmail.com'
 
 # --- [EMAIL SENDER FUNCTION] ---
 def send_notification_email(recipient_email, subject, body):
@@ -29,7 +29,6 @@ def send_notification_email(recipient_email, subject, body):
         return False
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
-    # Handles both single email string and comma-separated string
     msg['To'] = recipient_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
@@ -134,8 +133,6 @@ def save_data():
 
         if user_status != "active":
             return jsonify({'status': 'error', 'message': 'Account not active'}), 403
-        if not center_id:
-            return jsonify({'status': 'error', 'message': 'Missing centerId'}), 400
         if not isinstance(raw_data, list):
             return jsonify({'status': 'error', 'message': 'Invalid data'}), 400
 
@@ -309,9 +306,7 @@ def query_qa_data():
         
         # Additional parameters for specific queries
         energy_type = content.get("energy_type")
-        # Corrected: Only one date_param assignment, and comment is now on its own line
-        date_param = content.get("date") 
-        # Expected format:YYYY-MM-DD
+        date_param = content.get("date") # Expected format:YYYY-MM-DD
 
         if not query_type or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400
@@ -393,7 +388,6 @@ def query_qa_data():
                 day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
             except ValueError:
-                # CORRECTED LINE: Terminate string literal correctly
                 return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD.'}), 400
 
 

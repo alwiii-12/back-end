@@ -1,5 +1,5 @@
 # --- [UNCHANGED IMPORTS] ---
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file # send_file is newly added here
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
@@ -11,6 +11,10 @@ from calendar import monthrange
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
+
+# New imports for Excel export
+import pandas as pd
+from io import BytesIO
 
 app = Flask(__name__)
 CORS(app)
@@ -288,7 +292,7 @@ async def send_alert():
                 app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
             else:
                 app.logger.warning(f"No RSO emails collected for {center_id}, skipping email send.")
-                return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital to send alert to.'}), 200
+                return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital to send alert to.'}), 200 # Or decide to send to a fallback admin email
 
 
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
@@ -459,6 +463,73 @@ def query_qa_data():
     except Exception as e:
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- NEW: Export Excel Endpoint ---
+@app.route('/export-excel', methods=['POST'])
+async def export_excel_data():
+    try:
+        content = request.get_json(force=True)
+        month_param = content.get('month')
+        uid = content.get('uid')
+
+        if not month_param or not uid:
+            return jsonify({'error': 'Missing "month" or "uid"'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+        user_status = user_data.get("status", "pending")
+
+        if user_status != "active":
+            return jsonify({'error': 'Account not active'}), 403
+        if not center_id:
+            return jsonify({'error': 'Missing centerId'}), 400
+
+        # Fetch the data from Firestore (same logic as /data endpoint)
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        
+        # Prepare column headers for Excel
+        date_cols = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
+        excel_column_headers = ['Energy'] + date_cols
+
+        energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+
+        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+        if doc.exists:
+            for row in doc.to_dict().get("data", []):
+                energy, values = row.get("energy"), row.get("values", [])
+                if energy in energy_dict:
+                    # Ensure values are padded/truncated to match num_days
+                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
+
+        # Construct the data for pandas DataFrame
+        excel_data = []
+        for energy_type in ENERGY_TYPES:
+            excel_data.append([energy_type] + energy_dict[energy_type])
+
+        # Create a Pandas DataFrame
+        df = pd.DataFrame(excel_data, columns=excel_column_headers)
+
+        # Export to Excel in-memory
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='LINAC QA Data')
+        output.seek(0)
+
+        # Send the Excel file as a response
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"LINAC_QA_Data_{month_param}.xlsx"
+        )
+
+    except Exception as e:
+        app.logger.error(f"Error exporting Excel data: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 # --- ADMIN: GET PENDING USERS ---

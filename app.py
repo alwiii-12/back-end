@@ -13,8 +13,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
 # New imports for Excel export
-import pandas as pd
-from io import BytesIO
+import pandas as pd #
+from io import BytesIO #
 
 app = Flask(__name__)
 CORS(app)
@@ -314,7 +314,7 @@ def query_qa_data():
         
         # Additional parameters for specific queries
         energy_type = content.get("energy_type")
-        date_param = content.get("date") # Expected format: YYYY-MM-DD
+        date_param = content.get("date") # Expected format:YYYY-MM-DD
 
         if not query_type or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400
@@ -396,7 +396,7 @@ def query_qa_data():
                 day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
             except ValueError:
-                return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD.'}), 400
+                return jsonify({'status': 'error', 'message': 'Invalid date format. Please useYYYY-MM-DD.'}), 400
 
 
             found_value = None
@@ -545,7 +545,54 @@ async def get_pending_users():
     except Exception as e:
         return jsonify({'message': str(e)}), 500
 
-# --- ADMIN: UPDATE USER STATUS ---
+# --- ADMIN: GET ALL USERS (with optional filters) ---
+@app.route('/admin/users', methods=['GET'])
+async def get_all_users():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = await verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    status_filter = request.args.get('status')
+    hospital_filter = request.args.get('hospital')
+    search_term = request.args.get('search') # For general search (email, name, role, hospital)
+
+    try:
+        users_query = db.collection("users")
+
+        if status_filter:
+            users_query = users_query.where("status", "==", status_filter)
+        
+        if hospital_filter:
+            users_query = users_query.where("hospital", "==", hospital_filter)
+            # Firestore limitations: Cannot combine '==' queries on different fields without a composite index.
+            # For general search_term, we'll fetch all matching current filters and then filter in Python.
+
+        users_stream = users_query.stream()
+        
+        all_users = []
+        for doc in users_stream:
+            user_data = doc.to_dict()
+            user_data['uid'] = doc.id # Add UID to the dictionary
+
+            # Apply general search_term filtering in Python
+            if search_term:
+                search_term_lower = search_term.lower()
+                if not (search_term_lower in user_data.get('name', '').lower() or
+                        search_term_lower in user_data.get('email', '').lower() or
+                        search_term_lower in user_data.get('role', '').lower() or
+                        search_term_lower in user_data.get('hospital', '').lower()):
+                    continue # Skip this user if they don't match the search term
+            
+            all_users.append(user_data)
+
+        return jsonify(all_users), 200
+    except Exception as e:
+        app.logger.error(f"Error loading all users: {str(e)}", exc_info=True)
+        return jsonify({'message': str(e)}), 500
+
+
+# --- ADMIN: UPDATE USER STATUS, ROLE, OR HOSPITAL ---
 @app.route('/admin/update-user-status', methods=['POST'])
 async def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -555,17 +602,54 @@ async def update_user_status():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-        status = content.get("status")
-        if not uid or status not in ["active", "rejected"]:
-            return jsonify({'message': 'Invalid input'}), 400
+        
+        # New fields that can be updated
+        new_status = content.get("status")
+        new_role = content.get("role")
+        new_hospital = content.get("hospital")
+
+        if not uid:
+            return jsonify({'message': 'UID is required'}), 400
+        
+        updates = {}
+        if new_status is not None and new_status in ["active", "pending", "rejected"]: # Allow setting to pending as well
+            updates["status"] = new_status
+        if new_role is not None and new_role in ["Medical physicist", "RSO", "Admin"]: # Validate roles
+            updates["role"] = new_role
+        if new_hospital is not None and new_hospital.strip() != "": # Ensure hospital is not empty
+            updates["hospital"] = new_hospital
+            updates["centerId"] = new_hospital # Update centerId if hospital changes
+
+        if not updates:
+            return jsonify({'message': 'No valid fields provided for update'}), 400
+
         ref = db.collection("users").document(uid)
-        ref.update({"status": status})
-        data = ref.get().to_dict()
-        if APP_PASSWORD and data.get("email"):
-            msg = "Your LINAC QA account has been " + ("approved." if status == "active" else "rejected.")
-            send_notification_email(data["email"], "LINAC QA Status Update", msg)
-        return jsonify({'status': 'success'}), 200
+        ref.update(updates)
+
+        # Re-fetch user data to send email based on latest status
+        updated_user_data = ref.get().to_dict()
+        if APP_PASSWORD and updated_user_data.get("email"):
+            subject = "LINAC QA Account Update"
+            body = f"Your LINAC QA account details have been updated."
+            
+            if "status" in updates:
+                status_text = updates["status"].upper()
+                body += f"\nYour account status is now: {status_text}."
+                if status_text == "ACTIVE":
+                    body += " You can now log in and use the portal."
+                elif status_text == "REJECTED":
+                    body += " Please contact support for more information."
+            
+            if "role" in updates:
+                 body += f"\nYour role has been updated to: {updates['role']}."
+            if "hospital" in updates:
+                 body += f"\nYour hospital has been updated to: {updates['hospital']}."
+
+            send_notification_email(updated_user_data["email"], subject, body)
+
+        return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
     except Exception as e:
+        app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
         return jsonify({'message': str(e)}), 500
 
 # --- INDEX ---

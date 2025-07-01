@@ -17,7 +17,13 @@ import pandas as pd #
 from io import BytesIO #
 
 app = Flask(__name__)
-CORS(app)
+
+# Explicitly configure CORS to allow your frontend origin
+# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual deployed frontend URL.
+# For development, you might use "http://localhost:XXXX" or origins="*".
+# For production, specify your exact frontend domain(s).
+CORS(app, resources={r"/*": {"origins": "https://front-endnew.onrender.com"}})
+
 app.logger.setLevel(logging.DEBUG)
 
 # --- [EMAIL CONFIG] ---
@@ -590,6 +596,52 @@ async def get_all_users():
     except Exception as e:
         app.logger.error(f"Error loading all users: {str(e)}", exc_info=True)
         return jsonify({'message': str(e)}), 500
+
+# --- ADMIN: GET INDIVIDUAL HOSPITAL'S QA DATA ---
+@app.route('/admin/hospital-data', methods=['GET'])
+async def get_hospital_qa_data():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = await verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    hospital_id = request.args.get('hospitalId') # This will correspond to the centerId in Firestore
+    month_param = request.args.get('month') # Format: YYYY-MM
+
+    if not hospital_id or not month_param:
+        return jsonify({'error': 'Missing "hospitalId" or "month" parameter'}), 400
+
+    try:
+        # Fetch the data for the specific hospital and month from linac_data collection
+        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
+        doc = doc_ref.get()
+
+        if doc.exists:
+            raw_data = doc.to_dict().get("data", [])
+            
+            # Reconstruct the table data similar to how /data endpoint does it,
+            # ensuring all energy types are present and padded for the month's days.
+            year, mon = map(int, month_param.split("-"))
+            _, num_days = monthrange(year, mon)
+            
+            energy_dict = {e: [""] * num_days for e in ENERGY_TYPES} # Use the global ENERGY_TYPES
+            
+            for row in raw_data:
+                energy, values = row.get("energy"), row.get("values", [])
+                if energy in energy_dict:
+                    # Ensure values are padded/truncated to match num_days in case of data inconsistencies
+                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
+
+            # Convert back to list of lists structure for table display
+            table_data = [[e] + energy_dict[e] for e in ENERGY_TYPES]
+
+            return jsonify({'status': 'success', 'data': table_data}), 200
+        else:
+            return jsonify({'status': 'success', 'data': [], 'message': 'No data found for this hospital and month.'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error fetching hospital QA data: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 # --- ADMIN: UPDATE USER STATUS, ROLE, OR HOSPITAL ---

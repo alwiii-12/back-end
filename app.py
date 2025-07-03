@@ -37,7 +37,7 @@ def send_notification_email(recipient_email, subject, body):
     if not APP_PASSWORD:
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
-    msg = MIMultipart()
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     # Handles both single email string and comma-separated string
     msg['To'] = recipient_email
@@ -235,7 +235,8 @@ async def send_alert():
             app.logger.error(f"Error fetching RSO emails for center {center_id}: {str(e)}", exc_info=True)
             return jsonify({'status': 'error', 'message': 'Failed to fetch RSO emails'}), 500
 
-        # Check APP_PASSWORD upfront
+        # This part will only be reached if RSO emails were successfully fetched or if the try-except handled it.
+        # Check APP_PASSWORD upfront before proceeding with email sending logic
         if not APP_PASSWORD:
             app.logger.warning("APP_PASSWORD not configured. Cannot send email.")
             return jsonify({'status': 'email_credentials_missing', 'message': 'Email credentials missing'}), 500
@@ -282,13 +283,12 @@ async def send_alert():
         # --- Send the email ---
         msg = MIMultipart()
         msg['From'] = SENDER_EMAIL
-        # MODIFIED: Send to RSO emails
-        msg['To'] = ", ".join(rso_emails) # Join emails with comma for 'To' field
+        msg['To'] = ", ".join(rso_emails)
         msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})"
         msg.attach(MIMEText(message_body, 'plain'))
 
         # This part of email sending needs to be robustly handled within a try block or similar.
-        # This nested try-except will specifically handle smtplib errors.
+        # Moved smtplib calls into a nested try-except for clarity
         try:
             server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
             server.login(SENDER_EMAIL, APP_PASSWORD)
@@ -301,8 +301,8 @@ async def send_alert():
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
         except Exception as email_e:
             app.logger.error(f"Error sending email via SMTPLib: {str(email_e)}", exc_info=True)
-            # If email fails, return an appropriate error message related to email
             return jsonify({'status': 'email_send_error', 'message': f'Failed to send email: {str(email_e)}'}), 500
+
 
     except Exception as e: # This is the main try's except block, catching all other potential errors
         app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
@@ -470,6 +470,19 @@ def query_qa_data():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+# --- ADMIN: GET PENDING USERS ---
+@app.route('/admin/pending-users', methods=['GET'])
+async def get_pending_users():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = await verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+    try:
+        users = db.collection("users").where("status", "==", "pending").stream()
+        return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
+    except Exception as e:
+        return jsonify({'message': str(e)}), 500
+
 # --- ADMIN: GET ALL USERS (with optional filters) ---
 @app.route('/admin/users', methods=['GET'])
 async def get_all_users():
@@ -563,10 +576,6 @@ async def update_user_status():
                 if status_text == "ACTIVE":
                     body += " You can now log in and use the portal."
                 elif status_text == "REJECTED":
-                    body += " Please contact us"
-                elif status_text == "PENDING":
-                    body += " Please contact us"
-                else:
                     body += " Please contact support for more information."
             
             if "role" in updates:
@@ -631,231 +640,6 @@ async def delete_user():
     except Exception as e:
         app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
-
-# --- NEW: Export Excel Endpoint ---
-@app.route('/export-excel', methods=['POST'])
-async def export_excel_data():
-    try:
-        content = request.get_json(force=True)
-        month_param = content.get('month')
-        uid = content.get('uid')
-
-        if not month_param or not uid:
-            return jsonify({'error': 'Missing "month" or "uid"'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 404
-        user_data = user_doc.to_dict()
-        center_id = user_data.get("centerId")
-        user_status = user_data.get("status", "pending")
-
-        if user_status != "active":
-            return jsonify({'error': 'Account not active'}), 403
-        if not center_id:
-            return jsonify({'error': 'Missing centerId'}), 400
-
-        # Fetch the data from Firestore (same logic as /data endpoint)
-        year, mon = map(int, month_param.split("-"))
-        _, num_days = monthrange(year, mon)
-        
-        # Prepare column headers for Excel
-        date_cols = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-        excel_column_headers = ['Energy'] + date_cols
-
-        energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
-
-        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
-        if doc.exists:
-            for row in doc.to_dict().get("data", []):
-                energy, values = row.get("energy"), row.get("values", [])
-                if energy in energy_dict:
-                    # Ensure values are padded/truncated to match num_days
-                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
-
-        # Construct the data for pandas DataFrame
-        excel_data = []
-        for energy_type in ENERGY_TYPES:
-            excel_data.append([energy_type] + energy_dict[energy_type])
-
-        # Create a Pandas DataFrame
-        df = pd.DataFrame(excel_data, columns=excel_column_headers)
-
-        # Export to Excel in-memory
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='LINAC QA Data')
-        output.seek(0)
-
-        # Send the Excel file as a response
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f"LINAC_QA_Data_{month_param}.xlsx"
-        )
-
-    except Exception as e:
-        app.logger.error(f"Error exporting Excel data: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
-
-
-# --- ADMIN: GET ALL USERS (with optional filters) ---
-@app.route('/admin/users', methods=['GET'])
-async def get_all_users():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
-    status_filter = request.args.get('status')
-    hospital_filter = request.args.get('hospital')
-    search_term = request.args.get('search') # For general search (email, name, role, hospital)
-
-    try:
-        users_query = db.collection("users")
-
-        if status_filter:
-            users_query = users_query.where("status", "==", status_filter)
-        
-        if hospital_filter:
-            users_query = users_query.where("hospital", "==", hospital_filter)
-            # Firestore limitations: Cannot combine '==' queries on different fields without a composite index.
-            # For general search_term, we'll fetch all matching current filters and then filter in Python.
-
-        users_stream = users_query.stream()
-        
-        all_users = []
-        for doc in users_stream:
-            user_data = doc.to_dict()
-            user_data['uid'] = doc.id # Add UID to the dictionary
-
-            # Apply general search_term filtering in Python
-            if search_term:
-                search_term_lower = search_term.lower()
-                if not (search_term_lower in user_data.get('name', '').lower() or
-                        search_term_lower in user_data.get('email', '').lower() or
-                        search_term_lower in user_data.get('role', '').lower() or
-                        search_term_lower in user_data.get('hospital', '').lower()):
-                    continue
-            
-            all_users.append(user_data)
-
-        return jsonify(all_users), 200
-    except Exception as e:
-        app.logger.error(f"Error loading all users: {str(e)}", exc_info=True)
-        return jsonify({'message': str(e)}), 500
-
-
-# --- ADMIN: UPDATE USER STATUS, ROLE, OR HOSPITAL ---
-@app.route('/admin/update-user-status', methods=['POST'])
-async def update_user_status():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid = await verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-    try:
-        content = request.get_json(force=True)
-        uid = content.get("uid")
-        
-        # New fields that can be updated
-        new_status = content.get("status")
-        new_role = content.get("role")
-        new_hospital = content.get("hospital")
-
-        if not uid:
-            return jsonify({'message': 'UID is required'}), 400
-        
-        updates = {}
-        if new_status is not None and new_status in ["active", "pending", "rejected"]:
-            updates["status"] = new_status
-        if new_role is not None and new_role in ["Medical physicist", "RSO", "Admin"]:
-            updates["role"] = new_role
-        if new_hospital is not None and new_hospital.strip() != "":
-            updates["hospital"] = new_hospital
-            updates["centerId"] = new_hospital
-
-        if not updates:
-            return jsonify({'message': 'No valid fields provided for update'}), 400
-
-        ref = db.collection("users").document(uid)
-        ref.update(updates)
-
-        # Re-fetch user data to send email based on latest status
-        updated_user_data = ref.get().to_dict()
-        if APP_PASSWORD and updated_user_data.get("email"):
-            subject = "LINAC QA Account Update"
-            body = f"Your LINAC QA account details have been updated."
-            
-            if "status" in updates:
-                status_text = updates["status"].upper()
-                body += f"\nYour account status is now: {status_text}."
-                if status_text == "ACTIVE":
-                    body += " You can now log in and use the portal."
-                elif status_text == "REJECTED":
-                    body += " Please contact us"
-                elif status_text == "PENDING":
-                    body += " Please contact us"
-                else:
-                    body += " Please contact support for more information."
-            
-            if "role" in updates:
-                 body += f"\nYour role has been updated to: {updates['role']}."
-            if "hospital" in updates:
-                 body += f"\nYour hospital has been updated to: {updates['hospital']}."
-
-            send_notification_email(updated_user_data["email"], subject, body)
-
-        return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
-    except Exception as e:
-        app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
-        return jsonify({'message': str(e)}), 500
-
-# --- ADMIN: GET INDIVIDUAL HOSPITAL'S QA DATA ---
-@app.route('/admin/hospital-data', methods=['GET'])
-async def get_hospital_qa_data():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
-    hospital_id = request.args.get('hospitalId') # This will correspond to the centerId in Firestore
-    month_param = request.args.get('month') # Format:YYYY-MM
-
-    if not hospital_id or not month_param:
-        return jsonify({'error': 'Missing "hospitalId" or "month" parameter'}), 400
-
-    try:
-        # Fetch the data for the specific hospital and month from linac_data collection
-        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
-        doc = doc_ref.get()
-
-        if doc.exists:
-            raw_data = doc.to_dict().get("data", [])
-            
-            # Reconstruct the table data similar to how /data endpoint does it,
-            # ensuring all energy types are present and padded for the month's days.
-            year, mon = map(int, month_param.split("-"))
-            _, num_days = monthrange(year, mon)
-            
-            energy_dict = {e: [""] * num_days for e in ENERGY_TYPES} # Use the global ENERGY_TYPES
-            
-            for row in raw_data:
-                energy, values = row.get("energy"), row.get("values", [])
-                if energy in energy_dict:
-                    # Ensure values are padded/truncated to match num_days
-                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
-
-            # Convert back to list of lists structure for table display
-            table_data = [[e] + energy_dict[e] for e in ENERGY_TYPES]
-
-            return jsonify({'status': 'success', 'data': table_data}), 200
-        else:
-            return jsonify({'status': 'success', 'data': [], 'message': 'No data found for this hospital and month.'}), 200
-
-    except Exception as e:
-        app.logger.error(f"Error fetching hospital QA data: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
 
 # --- INDEX ---
 @app.route('/')

@@ -37,7 +37,7 @@ def send_notification_email(recipient_email, subject, body):
     if not APP_PASSWORD:
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
         return False
-    msg = MIMultipart()
+    msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     # Handles both single email string and comma-separated string
     msg['To'] = recipient_email
@@ -60,7 +60,7 @@ if not firebase_json:
     raise Exception("FIREBASE_CREDENTIALS not set")
 firebase_dict = json.loads(firebase_json)
 cred = credentials.Certificate(firebase_dict)
-firebase_admin.initializeApp(cred)
+firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
@@ -196,8 +196,6 @@ def get_data():
 # --- ALERT EMAIL ---
 @app.route('/send-alert', methods=['POST'])
 async def send_alert():
-    month_alerts_doc_ref = None
-
     try:
         content = request.get_json(force=True)
         current_out_values = content.get("outValues", [])
@@ -220,19 +218,28 @@ async def send_alert():
             app.logger.warning(f"Center ID not found for user {uid} during alert processing.")
             return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
 
-        # NEW: Find all RSO emails for the current hospital/centerId
         rso_emails = []
-        try:
+        try: # Nested try for rso_emails fetching
             rso_users = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream()
             for rso_user in rso_users:
                 rso_data = rso_user.to_dict()
                 if 'email' in rso_data and rso_data['email']:
                     rso_emails.append(rso_data['email'])
             
+            # This return is correctly inside the nested try-except for email fetching
             if not rso_emails:
                 app.logger.warning(f"No RSO email found for centerId: {center_id}. Alert not sent to RSO.")
                 return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200
 
+        except Exception as e:
+            app.logger.error(f"Error fetching RSO emails for center {center_id}: {str(e)}", exc_info=True)
+            return jsonify({'status': 'error', 'message': 'Failed to fetch RSO emails'}), 500
+
+        # This part will only be reached if RSO emails were successfully fetched or if the try-except handled it.
+        # Check APP_PASSWORD upfront before proceeding with email sending logic
+        if not APP_PASSWORD:
+            app.logger.warning("APP_PASSWORD not configured. Cannot send email.")
+            return jsonify({'status': 'email_credentials_missing', 'message': 'Email credentials missing'}), 500
 
         month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}")
         app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
@@ -276,34 +283,29 @@ async def send_alert():
         # --- Send the email ---
         msg = MIMultipart()
         msg['From'] = SENDER_EMAIL
-        # MODIFIED: Send to RSO emails
-        msg['To'] = ", ".join(rso_emails) # Join emails with comma for 'To' field
+        msg['To'] = ", ".join(rso_emails)
         msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})"
         msg.attach(MIMEText(message_body, 'plain'))
 
-        if APP_PASSWORD:
-            # Ensure there are recipients before attempting to send
-            if rso_emails:
-                server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-                server.login(SENDER_EMAIL, APP_PASSWORD)
-                # Pass the list of recipients to send_message for proper delivery
-                server.send_message(msg)
-                server.quit()
-                app.logger.info(f"Email alert sent to RSO(s) {msg['To']} for {hospital} ({month_key}).")
+        # This part of email sending needs to be robustly handled within a try block or similar.
+        # Moved smtplib calls into a nested try-except for clarity
+        try:
+            server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+            server.login(SENDER_EMAIL, APP_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+            app.logger.info(f"Email alert sent to RSO(s) {msg['To']} for {hospital} ({month_key}).")
 
-                month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
-                app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
-            else:
-                app.logger.warning(f"No RSO emails collected for {center_id}, skipping email send.")
-                return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital to send alert to.'}), 200
-
-
+            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
+            app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
-        else:
-            app.logger.warning("APP_PASSWORD not configured. Cannot send email.")
-            return jsonify({'status': 'email not sent', 'message': 'Email credentials missing'}), 500
-    except Exception as e:
-        app.logger.error(f"Error sending alert: {str(e)}", exc_info=True)
+        except Exception as email_e:
+            app.logger.error(f"Error sending email via SMTPLib: {str(email_e)}", exc_info=True)
+            return jsonify({'status': 'email_send_error', 'message': f'Failed to send email: {str(email_e)}'}), 500
+
+
+    except Exception as e: # This is the main try's except block, catching all other potential errors
+        app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- NEW: Chatbot Query Endpoint ---
@@ -481,7 +483,54 @@ async def get_pending_users():
     except Exception as e:
         return jsonify({'message': str(e)}), 500
 
-# --- ADMIN: UPDATE USER STATUS ---
+# --- ADMIN: GET ALL USERS (with optional filters) ---
+@app.route('/admin/users', methods=['GET'])
+async def get_all_users():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = await verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    status_filter = request.args.get('status')
+    hospital_filter = request.args.get('hospital')
+    search_term = request.args.get('search') # For general search (email, name, role, hospital)
+
+    try:
+        users_query = db.collection("users")
+
+        if status_filter:
+            users_query = users_query.where("status", "==", status_filter)
+        
+        if hospital_filter:
+            users_query = users_query.where("hospital", "==", hospital_filter)
+            # Firestore limitations: Cannot combine '==' queries on different fields without a composite index.
+            # For general search_term, we'll fetch all matching current filters and then filter in Python.
+
+        users_stream = users_query.stream()
+        
+        all_users = []
+        for doc in users_stream:
+            user_data = doc.to_dict()
+            user_data['uid'] = doc.id # Add UID to the dictionary
+
+            # Apply general search_term filtering in Python
+            if search_term:
+                search_term_lower = search_term.lower()
+                if not (search_term_lower in user_data.get('name', '').lower() or
+                        search_term_lower in user_data.get('email', '').lower() or
+                        search_term_lower in user_data.get('role', '').lower() or
+                        search_term_lower in user_data.get('hospital', '').lower()):
+                    continue
+            
+            all_users.append(user_data)
+
+        return jsonify(all_users), 200
+    except Exception as e:
+        app.logger.error(f"Error loading all users: {str(e)}", exc_info=True)
+        return jsonify({'message': str(e)}), 500
+
+
+# --- ADMIN: UPDATE USER STATUS, ROLE, OR HOSPITAL ---
 @app.route('/admin/update-user-status', methods=['POST'])
 async def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -491,18 +540,106 @@ async def update_user_status():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-        status = content.get("status")
-        if not uid or status not in ["active", "rejected"]:
-            return jsonify({'message': 'Invalid input'}), 400
+        
+        # New fields that can be updated
+        new_status = content.get("status")
+        new_role = content.get("role")
+        new_hospital = content.get("hospital")
+
+        if not uid:
+            return jsonify({'message': 'UID is required'}), 400
+        
+        updates = {}
+        if new_status is not None and new_status in ["active", "pending", "rejected"]:
+            updates["status"] = new_status
+        if new_role is not None and new_role in ["Medical physicist", "RSO", "Admin"]:
+            updates["role"] = new_role
+        if new_hospital is not None and new_hospital.strip() != "":
+            updates["hospital"] = new_hospital
+            updates["centerId"] = new_hospital
+
+        if not updates:
+            return jsonify({'message': 'No valid fields provided for update'}), 400
+
         ref = db.collection("users").document(uid)
-        ref.update({"status": status})
-        data = ref.get().to_dict()
-        if APP_PASSWORD and data.get("email"):
-            msg = "Your LINAC QA account has been " + ("approved." if status == "active" else "rejected.")
-            send_notification_email(data["email"], "LINAC QA Status Update", msg)
-        return jsonify({'status': 'success'}), 200
+        ref.update(updates)
+
+        # Re-fetch user data to send email based on latest status
+        updated_user_data = ref.get().to_dict()
+        if APP_PASSWORD and updated_user_data.get("email"):
+            subject = "LINAC QA Account Update"
+            body = f"Your LINAC QA account details have been updated."
+            
+            if "status" in updates:
+                status_text = updates["status"].upper()
+                body += f"\nYour account status is now: {status_text}."
+                if status_text == "ACTIVE":
+                    body += " You can now log in and use the portal."
+                elif status_text == "REJECTED":
+                    body += " Please contact support for more information."
+            
+            if "role" in updates:
+                 body += f"\nYour role has been updated to: {updates['role']}."
+            if "hospital" in updates:
+                 body += f"\nYour hospital has been updated to: {updates['hospital']}."
+
+            send_notification_email(updated_user_data["email"], subject, body)
+
+        return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
     except Exception as e:
+        app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
         return jsonify({'message': str(e)}), 500
+
+# --- ADMIN: DELETE USER ---
+@app.route('/admin/delete-user', methods=['DELETE'])
+async def delete_user():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = await verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        content = request.get_json(force=True)
+        uid_to_delete = content.get("uid")
+
+        if not uid_to_delete:
+            return jsonify({'message': 'Missing UID for deletion'}), 400
+
+        # 1. Delete user from Firebase Authentication
+        try:
+            auth.delete_user(uid_to_delete)
+            app.logger.info(f"Firebase Auth user {uid_to_delete} deleted.")
+        except Exception as e:
+            # If user not found in Auth, might have been deleted already or never fully created
+            if "User record not found" in str(e):
+                app.logger.warning(f"Firebase Auth user {uid_to_delete} not found, proceeding with Firestore deletion.")
+            else:
+                app.logger.error(f"Error deleting Firebase Auth user {uid_to_delete}: {str(e)}", exc_info=True)
+                return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
+
+        # 2. Delete user's document from Firestore
+        user_doc_ref = db.collection("users").document(uid_to_delete)
+        user_doc = user_doc_ref.get() # Get doc to log data before deleting
+
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            user_doc_ref.delete()
+            app.logger.info(f"Firestore user document {uid_to_delete} ({user_data.get('email')}) deleted.")
+        else:
+            app.logger.warning(f"Firestore user document {uid_to_delete} not found (already deleted?).")
+        
+        # Optional: Delete associated QA data if desired (more complex, consider implications)
+        # This would involve iterating through subcollections, which can be expensive/slow
+        # Example (DO NOT USE FOR LARGE DATASETS, requires recursive delete):
+        # db.collection("linac_data").document(user_data.get("centerId")).delete() 
+        # This line might delete all data for a hospital if centerId is just hospital name.
+        # Be very careful with this. For now, we only delete the user, not their QA data.
+
+        return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
+        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 # --- INDEX ---
 @app.route('/')

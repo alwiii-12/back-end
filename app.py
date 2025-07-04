@@ -1,21 +1,20 @@
 # --- [SENTRY INTEGRATION - NEW IMPORTS AND INITIALIZATION] ---
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
-import os # Make sure os is imported, which it already is.
+import os
 
 # Retrieve Sentry DSN from environment variable
-# IMPORTANT: This is the correct way to load it.
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
 
 if SENTRY_DSN:
     sentry_sdk.init(
-        dsn=SENTRY_DSN, # DSN is loaded from environment variable here
+        dsn=SENTRY_DSN,
         integrations=[
             FlaskIntegration(),
         ],
-        traces_sample_rate=1.0,
-        profiles_sample_rate=1.0,
-        send_default_pii=True
+        traces_sample_rate=1.0, # Capture 100% of transactions for performance monitoring
+        profiles_sample_rate=1.0, # Capture 100% of active samples for profiling
+        send_default_pii=True # Enable sending of PII (Personally Identifiable Information)
     )
     print("Sentry initialized successfully.")
 else:
@@ -28,11 +27,10 @@ from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-# import os # Already imported above for Sentry_DSN
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime, timedelta # timedelta needed for anomaly detection data fetching
+from datetime import datetime, timedelta # timedelta is only here if you plan to use it for future ML data fetching. If not, can remove.
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -41,14 +39,13 @@ from firebase_admin import credentials, firestore, auth
 import pandas as pd
 from io import BytesIO
 
-# Imports for ML models (if you've already added them or plan to)
-import joblib # For saving/loading models
-import numpy as np # For numerical operations
-try:
-    from prophet import Prophet # Optional: for drift prediction
-except ImportError:
-    Prophet = None
-    print("Prophet library not found. Drift prediction features will be unavailable.")
+# --- Removed ML-related imports (joblib, numpy, prophet) as they are not used yet ---
+# import joblib
+# import numpy as np
+# try:
+#     from prophet import Prophet
+# except ImportError:
+#     Prophet = None
 
 
 app = Flask(__name__)
@@ -63,22 +60,24 @@ app.logger.setLevel(logging.DEBUG)
 
 # --- [EMAIL CONFIG] ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This might be less used now
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
 # --- [EMAIL SENDER FUNCTION] ---
+# Consolidated email sending logic
 def send_notification_email(recipient_email, subject, body):
     if not APP_PASSWORD:
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
-        # If Sentry is initialized, you could capture this warning as a message
         if SENTRY_DSN:
-            sentry_sdk.capture_message(f"EMAIL_APP_PASSWORD not set. Cannot send notification to {recipient_email}.")
+            sentry_sdk.capture_message(f"EMAIL_APP_PASSWORD not set. Cannot send notification to {recipient_email}.", level="warning")
         return False
+    
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
+    
     try:
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(SENDER_EMAIL, APP_PASSWORD)
@@ -87,16 +86,14 @@ def send_notification_email(recipient_email, subject, body):
         app.logger.info(f"📧 Notification sent to {recipient_email}")
         return True
     except Exception as e:
-        app.logger.error(f"❌ Email error: {str(e)}", exc_info=True)
-        # Capture the exception with Sentry
+        app.logger.error(f"❌ Email error: {str(e)} for recipient {recipient_email}", exc_info=True)
         if SENTRY_DSN:
-            sentry_sdk.capture_exception(e)
+            sentry_sdk.capture_exception(e) # Capture the exception with Sentry
         return False
 
 # --- [FIREBASE INIT] ---
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
 if not firebase_json:
-    # If Sentry is initialized, capture a critical message
     if SENTRY_DSN:
         sentry_sdk.capture_message("CRITICAL: FIREBASE_CREDENTIALS environment variable not set.", level="fatal")
     raise Exception("FIREBASE_CREDENTIALS not set")
@@ -105,6 +102,7 @@ cred = credentials.Certificate(firebase_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
+# Defined once here for consistency
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
 # --- VERIFY ADMIN TOKEN ---
@@ -116,7 +114,7 @@ async def verify_admin_token(id_token):
         if user_doc.exists and user_doc.to_dict().get('role') == 'Admin':
             return True, uid
     except Exception as e:
-        app.logger.error("Token check failed: %s", str(e))
+        app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
         if SENTRY_DSN:
             sentry_sdk.capture_exception(e) # Capture token verification failures
     return False, None
@@ -143,7 +141,7 @@ def signup():
         })
         return jsonify({'status': 'success', 'message': 'User registered'}), 200
     except Exception as e:
-        app.logger.error("Signup failed: %s", str(e), exc_info=True)
+        app.logger.error(f"Signup failed: {str(e)}", exc_info=True)
         if SENTRY_DSN:
             sentry_sdk.capture_exception(e) # Capture signup errors
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -170,7 +168,7 @@ def login():
             'status': user_data.get("status", "unknown")
         }), 200
     except Exception as e:
-        app.logger.error("Login failed: %s", str(e), exc_info=True)
+        app.logger.error(f"Login failed: {str(e)}", exc_info=True)
         if SENTRY_DSN:
             sentry_sdk.capture_exception(e) # Capture login errors
         return jsonify({'status': 'error', 'message': 'Login failed'}), 500
@@ -181,7 +179,7 @@ def save_data():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-        month_param = content.get("month") # Use this for month_key
+        month_param = content.get("month")
         raw_data = content.get("data")
 
         user_doc = db.collection('users').document(uid).get()
@@ -211,9 +209,9 @@ def save_data():
         db.collection("linac_data").document(center_id).collection("months").document(month_doc_id).set(
             {"data": converted}, merge=True)
         
-        # --- Anomaly Detection on newly changed or added data points ---
+        # --- Anomaly Detection on newly changed or added data points (PLACEHOLDER) ---
         anomalies_detected = []
-        today_date_str = datetime.now().strftime('%Y-%m-%d') # The date for which data is being saved
+        # today_date_str = datetime.now().strftime('%Y-%m-%d') # Removed as it's not used when ML is commented out
         
         # This part of the code for ML is commented out for now as it needs proper
         # ML model setup (training, loading) and feature engineering.
@@ -263,7 +261,7 @@ def save_data():
 
         return jsonify({'status': 'success', 'anomalies': anomalies_detected}), 200
     except Exception as e:
-        app.logger.error("Save data failed: %s", str(e), exc_info=True)
+        app.logger.error(f"Save data failed: {str(e)}", exc_info=True)
         if SENTRY_DSN:
             sentry_sdk.capture_exception(e) # Capture save data errors
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -303,7 +301,7 @@ def get_data():
         table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
         return jsonify({'data': table}), 200
     except Exception as e:
-        app.logger.error("Get data failed: %s", str(e), exc_info=True)
+        app.logger.error(f"Get data failed: {str(e)}", exc_info=True)
         if SENTRY_DSN:
             sentry_sdk.capture_exception(e) # Capture get data errors
         return jsonify({'error': str(e)}), 500
@@ -348,7 +346,7 @@ async def send_alert():
                     rso_emails.append(rso_data['email'])
             
             if not rso_emails:
-                app.logger.warning(f"No RSO email found for centerId: {center_id}. Alert not sent to RSO.")
+                app.logger.info(f"No RSO email found for centerId: {center_id}. Alert not sent to RSO.")
                 if SENTRY_DSN:
                     sentry_sdk.capture_message(f"No RSO email found for centerId: {center_id}. Alert not sent.", level="info")
                 return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200
@@ -403,7 +401,7 @@ async def send_alert():
         else:
             message_body += "All LINAC QA values are currently within tolerance for this month.\n"
         
-        # Using the send_notification_email helper function here
+        # Consistently using the send_notification_email helper function here
         email_sent = send_notification_email(", ".join(rso_emails), f"⚠ LINAC QA Status - {hospital} ({month_key})", message_body)
 
         if email_sent:
@@ -411,6 +409,9 @@ async def send_alert():
             app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
         else:
+            app.logger.error("Failed to send alert email via helper function.")
+            if SENTRY_DSN:
+                sentry_sdk.capture_message("Failed to send alert email via helper function.", level="error")
             return jsonify({'status': 'email_send_error', 'message': 'Failed to send email via helper function.'}), 500
 
     except Exception as e:
@@ -579,7 +580,7 @@ def query_qa_data():
     except Exception as e:
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
         if SENTRY_DSN:
-            sentry_sdk.capture_exception(e) # Capture chatbot errors
+            sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- ADMIN: GET PENDING USERS ---
@@ -593,7 +594,7 @@ async def get_pending_users():
         users = db.collection("users").where("status", "==", "pending").stream()
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
     except Exception as e:
-        app.logger.error("Get pending users failed: %s", str(e), exc_info=True)
+        app.logger.error(f"Get pending users failed: {str(e)}", exc_info=True)
         if SENTRY_DSN:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
@@ -683,7 +684,7 @@ async def update_user_status():
 
         # Re-fetch user data to send email based on latest status
         updated_user_data = ref.get().to_dict()
-        # Using the send_notification_email helper function here
+        # Consistently using the send_notification_email helper function here
         if updated_user_data.get("email"):
             subject = "LINAC QA Account Update"
             body = f"Your LINAC QA account details have been updated."
@@ -803,7 +804,10 @@ async def get_hospital_qa_data():
         return jsonify({'status': 'success', 'data': final_table_data}), 200
 
     except ValueError:
-        return jsonify({'message': 'Invalid month format. Please useYYYY-MM-DD.'}), 400
+        app.logger.error(f"Invalid month format in /admin/hospital-data: {month_param}", exc_info=True)
+        if SENTRY_DSN:
+            sentry_sdk.capture_message(f"Invalid month format in /admin/hospital-data: {month_param}", level="warning")
+        return jsonify({'message': 'Invalid month format. Please useYYYY-MM.'}), 400
     except Exception as e:
         app.logger.error(f"Error fetching hospital QA data for admin: {str(e)}", exc_info=True)
         if SENTRY_DSN:
@@ -873,61 +877,11 @@ async def export_excel():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': f"Failed to export Excel file: {str(e)}"}), 500
 
-# --- ML Model Management Endpoints (PLACEHOLDERS) ---
-# These routes are commented out as they depend on ML setup (joblib, prophet etc.)
-# and need to be fully implemented with data fetching and model persistence logic.
-
-# # Helper to load/save models - can be extended to use cloud storage or a dedicated folder
-# MODEL_DIR = 'ml_models'
-# os.makedirs(MODEL_DIR, exist_ok=True) # Ensure this directory exists and is writable on Render
-
-# def save_model(model, center_id, energy_type, model_type):
-#     """Saves a trained model."""
-#     filepath = os.path.join(MODEL_DIR, f"{center_id}_{energy_type}_{model_type}.pkl")
-#     try:
-#         import joblib
-#         joblib.dump(model, filepath)
-#         app.logger.info(f"Model saved: {filepath}")
-#     except Exception as e:
-#         app.logger.error(f"Failed to save model {filepath}: {e}")
-#         if SENTRY_DSN: sentry_sdk.capture_exception(e)
-
-# def load_model(center_id, energy_type, model_type):
-#     """Loads a trained model."""
-#     filepath = os.path.join(MODEL_DIR, f"{center_id}_{energy_type}_{model_type}.pkl")
-#     try:
-#         import joblib
-#         if os.path.exists(filepath):
-#             model = joblib.load(filepath)
-#             app.logger.info(f"Model loaded: {filepath}")
-#             return model
-#         else:
-#             app.logger.warning(f"Model not found: {filepath}")
-#             if SENTRY_DSN: sentry_sdk.capture_message(f"ML Model not found: {filepath}", level="warning")
-#             return None
-#     except Exception as e:
-#         app.logger.error(f"Failed to load model {filepath}: {e}")
-#         if SENTRY_DSN: sentry_sdk.capture_exception(e)
-#         return None
-
-# def get_ml_data_for_energy(center_id, energy_type, days_back=180):
-#     """
-#     Fetches historical QA data for a specific energy type and prepares it for ML.
-#     Returns a pandas DataFrame.
-#     """
-#     # ... (Implementation from previous response) ...
-#     pass # Placeholder
-
-# @app.route('/admin/train-anomaly-model', methods=['POST'])
-# async def train_anomaly_model():
-#     # ... (Implementation from previous response) ...
-#     pass # Placeholder
-
-# @app.route('/admin/train-drift-model', methods=['POST'])
-# async def train_drift_model():
-#     # ... (Implementation from previous response) ...
-#     pass # Placeholder
-
+# --- TEMPORARY DEBUGGING ROUTE FOR SENTRY - REMOVE AFTER TESTING ---
+@app.route("/debug-sentry")
+def trigger_error():
+    division_by_zero = 1 / 0  # This will intentionally cause a ZeroDivisionError
+    return "Hello, world!"
 
 # --- INDEX ---
 @app.route('/')

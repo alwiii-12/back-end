@@ -9,6 +9,7 @@ import json
 import logging
 from calendar import monthrange
 from datetime import datetime
+
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -186,7 +187,8 @@ def get_data():
             for row in doc.to_dict().get("data", []):
                 energy, values = row.get("energy"), row.get("values", [])
                 if energy in energy_dict:
-                    energy_dict[energy] = values
+                    # Ensure the retrieved values list is padded/truncated to match num_days
+                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
 
         table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
         return jsonify({'data': table}), 200
@@ -281,7 +283,7 @@ async def send_alert():
             message_body += "All LINAC QA values are currently within tolerance for this month.\n"
         
         # --- Send the email ---
-        msg = MIMultipart()
+        msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = ", ".join(rso_emails)
         msg['Subject'] = f"⚠ LINAC QA Status - {hospital} ({month_key})"
@@ -469,7 +471,6 @@ def query_qa_data():
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-
 # --- ADMIN: GET PENDING USERS ---
 @app.route('/admin/pending-users', methods=['GET'])
 async def get_pending_users():
@@ -640,6 +641,120 @@ async def delete_user():
     except Exception as e:
         app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
+
+# --- ADMIN: GET HOSPITAL QA DATA ---
+@app.route('/admin/hospital-data', methods=['GET'])
+async def get_hospital_qa_data():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = await verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    hospital_id = request.args.get('hospitalId')
+    month_param = request.args.get('month') # Expected format: YYYY-MM
+
+    if not hospital_id or not month_param:
+        return jsonify({'message': 'Missing hospitalId or month parameter'}), 400
+
+    try:
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+
+        # Initialize the data structure with all energy types and empty values for each day
+        # This ensures consistent rows and number of columns for the frontend table
+        results_data = {energy: [''] * num_days for energy in ENERGY_TYPES}
+
+        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
+        doc_snap = doc_ref.get()
+
+        if doc_snap.exists:
+            firestore_data = doc_snap.to_dict().get("data", [])
+            for row in firestore_data:
+                energy = row.get("energy")
+                values = row.get("values", [])
+                if energy in results_data:
+                    # Pad or truncate values to match the number of days in the month
+                    results_data[energy] = (values + [''] * num_days)[:num_days]
+        
+        # Convert the dictionary to the list of lists format expected by the frontend
+        # Ensure the order of energy types is consistent using ENERGY_TYPES
+        final_table_data = []
+        for energy_type in ENERGY_TYPES:
+            final_table_data.append([energy_type] + results_data[energy_type])
+
+        return jsonify({'status': 'success', 'data': final_table_data}), 200
+
+    except ValueError:
+        return jsonify({'message': 'Invalid month format. Please use YYYY-MM.'}), 400
+    except Exception as e:
+        app.logger.error(f"Error fetching hospital QA data for admin: {str(e)}", exc_info=True)
+        return jsonify({'message': f"Failed to fetch data: {str(e)}"}), 500
+
+# --- Excel Export Endpoint (previously missing, now added for completeness based on requirements.txt) ---
+@app.route('/export-excel', methods=['POST'])
+async def export_excel():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid")
+        month_param = content.get("month") # YYYY-MM
+
+        if not uid or not month_param:
+            return jsonify({'error': 'Missing UID or month parameter'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+        user_status = user_data.get("status", "pending")
+
+        if user_status != "active":
+            return jsonify({'error': 'Account not active'}), 403
+        if not center_id:
+            return jsonify({'error': 'Missing centerId'}), 400
+
+        # Use the get_data logic to fetch the structured data
+        # Mimic the /data endpoint's data retrieval for consistency
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+
+        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+        if doc.exists:
+            for row in doc.to_dict().get("data", []):
+                energy, values = row.get("energy"), row.get("values", [])
+                if energy in energy_dict:
+                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
+        
+        # Prepare data for DataFrame
+        data_for_df = []
+        # Create column headers (Energy and then dates)
+        columns = ['Energy']
+        for i in range(1, num_days + 1):
+            columns.append(f"{year}-{str(mon).zfill(2)}-{str(i).zfill(2)}")
+
+        for energy_type in ENERGY_TYPES:
+            row_data = [energy_type] + energy_dict[energy_type]
+            data_for_df.append(row_data)
+
+        df = pd.DataFrame(data_for_df, columns=columns)
+
+        # Create an in-memory binary stream for the Excel file
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='LINAC QA Data')
+        output.seek(0) # Rewind to the beginning of the stream
+
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            download_name=f'LINAC_QA_Data_{month_param}.xlsx',
+            as_attachment=True
+        )
+
+    except Exception as e:
+        app.logger.error(f"Error exporting Excel file: {str(e)}", exc_info=True)
+        return jsonify({'error': f"Failed to export Excel file: {str(e)}"}), 500
 
 # --- INDEX ---
 @app.route('/')

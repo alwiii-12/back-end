@@ -12,24 +12,19 @@ from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
-# New imports for Excel export and updated CORS
+# New imports for Excel export
 import pandas as pd
 from io import BytesIO
-import re # Added for CORS regular expression
 
 app = Flask(__name__)
 
-# Explicitly configure CORS to allow your frontend origin
-# --- UPDATED CORS CONFIGURATION ---
-# This new configuration uses a regular expression for the origin, which is more reliable,
-# and explicitly allows the "Authorization" header required for your admin routes.
+# --- FINAL, SIMPLIFIED CORS CONFIGURATION ---
+# This direct configuration is designed to solve the preflight request issue.
 CORS(app,
-     origins=[re.compile(r"https?://front-endnew\.onrender\.com")],
-     supports_credentials=True,
-     resources={r"/*": {}},
-     allow_headers=["Authorization", "Content-Type"]
+    origins="https://front-endnew.onrender.com",
+    allow_headers=["Content-Type", "Authorization"],
+    supports_credentials=True
 )
-
 
 app.logger.setLevel(logging.DEBUG)
 
@@ -296,7 +291,7 @@ def query_qa_data():
                         out_dates.add(date_strings[i])
             return jsonify({'status': 'success', 'dates': sorted(list(out_dates))}), 200
 
-        # ... other query types ...
+        # ... other query types can be added here ...
 
         else:
             return jsonify({'status': 'error', 'message': 'Unknown query type'}), 400
@@ -396,7 +391,8 @@ async def get_hospital_data():
         doc = doc_ref.get()
         
         if not doc.exists:
-            return jsonify({'message': 'No data found for this hospital and month'}), 404
+            # Return 200 OK with an empty data array so the frontend can render an empty table
+            return jsonify({'data': []}), 200
             
         data = doc.to_dict().get("data", [])
         # Reformat data back to the simple list-of-lists format for the frontend table

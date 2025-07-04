@@ -4,26 +4,17 @@ from sentry_sdk.integrations.flask import FlaskIntegration
 import os # Make sure os is imported, which it already is.
 
 # Retrieve Sentry DSN from environment variable
-# IMPORTANT: Replace 'YOUR_SENTRY_DSN_HERE' with your actual DSN for local testing,
-# but for production, make sure to set this as an environment variable in Render!
+# IMPORTANT: This is the correct way to load it.
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
 
 if SENTRY_DSN:
     sentry_sdk.init(
-        dsn=SENTRY_DSN,
+        dsn=SENTRY_DSN, # DSN is loaded from environment variable here
         integrations=[
             FlaskIntegration(),
         ],
-        # Set traces_sample_rate to 1.0 to capture 100%
-        # of transactions for performance monitoring.
-        # We recommend adjusting this value in production.
         traces_sample_rate=1.0,
-        # Set profiles_sample_rate to 1.0 to capture 100%
-        # of active samples.
-        # We recommend adjusting this value in production.
         profiles_sample_rate=1.0,
-        # Enable sending of PII (Personally Identifiable Information) like user data.
-        # Be careful with this in production for privacy reasons.
         send_default_pii=True
     )
     print("Sentry initialized successfully.")
@@ -825,7 +816,7 @@ async def export_excel():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-        month_param = content.get("month") # YYYY-MM
+        month_param = content.get("month") #YYYY-MM
 
         if not uid or not month_param:
             return jsonify({'error': 'Missing UID or month parameter'}), 400
@@ -934,11 +925,6 @@ async def export_excel():
 
 # @app.route('/admin/train-drift-model', methods=['POST'])
 # async def train_drift_model():
-#     # ... (Implementation from previous response) ...
-#     pass # Placeholder
-
-# @app.route('/predict-drift', methods=['GET'])
-# async def predict_drift():
 #     # ... (Implementation from previous response) ...
 #     pass # Placeholder
 

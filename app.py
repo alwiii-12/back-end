@@ -211,7 +211,7 @@ def save_data():
         
         # --- Anomaly Detection on newly changed or added data points (PLACEHOLDER) ---
         anomalies_detected = []
-        # today_date_str = datetime.now().strftime('%Y-%m-%d') # Removed as it's not used when ML is commented out
+        # today_date_str = datetime.now().strftime('%Y-%m-%d')
         
         # This part of the code for ML is commented out for now as it needs proper
         # ML model setup (training, loading) and feature engineering.
@@ -417,7 +417,7 @@ async def send_alert():
     except Exception as e:
         app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
         if SENTRY_DSN:
-            sentry_sdk.capture_exception(e) # Capture general send_alert errors
+            sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- NEW: Chatbot Query Endpoint ---
@@ -513,6 +513,9 @@ def query_qa_data():
                 day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
             except ValueError:
+                app.logger.error(f"Invalid date format in /query-qa-data: {date_param}", exc_info=True)
+                if SENTRY_DSN:
+                    sentry_sdk.capture_message(f"Invalid date format in /query-qa-data: {date_param}", level="warning")
                 return jsonify({'status': 'error', 'message': 'Invalid date format. Please useYYYY-MM-DD.'}), 400
 
 

@@ -325,6 +325,8 @@ async def send_alert():
         rso_emails = []
         try:
             rso_users = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream()
+            # UserWarning: Detected filter using positional arguments. Prefer using the 'filter' keyword argument instead.
+            # Fix: rso_users = db.collection('users').filter(firestore.FieldFilter('centerId', '==', center_id)).filter(firestore.FieldFilter('role', '==', 'RSO')).stream()
             for rso_user in rso_users:
                 rso_data = rso_user.to_dict()
                 if 'email' in rso_data and rso_data['email']:
@@ -578,7 +580,7 @@ async def get_pending_users():
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
-        users = db.collection("users").where("status", "==", "pending").stream()
+        users = db.collection("users").where(filter=firestore.FieldFilter("status", "==", "pending")).stream() # Corrected filter usage
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
     except Exception as e:
         app.logger.error(f"Get pending users failed: {str(e)}", exc_info=True)
@@ -602,10 +604,10 @@ async def get_all_users():
         users_query = db.collection("users")
 
         if status_filter:
-            users_query = users_query.where("status", "==", status_filter)
+            users_query = users_query.filter(firestore.FieldFilter("status", "==", status_filter)) # Corrected filter usage
         
         if hospital_filter:
-            users_query = users_query.where("hospital", "==", hospital_filter)
+            users_query = users_query.filter(firestore.FieldFilter("hospital", "==", hospital_filter)) # Corrected filter usage
 
         users_stream = users_query.stream()
         

@@ -398,7 +398,10 @@ def send_alert(): # Changed from async def to def
             if sentry_sdk_configured:
                 sentry_sdk.capture_message("Failed to send alert email via helper function.", level="error")
             return jsonify({'status': 'email_send_error', 'message': 'Failed to send email via helper function.'}), 500
-
+# --- ALERT EMAIL ---
+@app.route('/send-alert', methods=['POST'])
+def send_alert(): # Changed from async def to def
+    try:
         content = request.get_json(force=True)
         query_type = content.get("query")
         month_param = content.get("month")

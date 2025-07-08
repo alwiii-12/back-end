@@ -182,7 +182,7 @@ def login():
 
 # --- NEW: Generic Log Event Endpoint ---
 @app.route('/log_event', methods=['POST'])
-async def log_event():
+def log_event(): # Changed from async def to def
     try:
         event_data = request.get_json(force=True)
         
@@ -294,7 +294,7 @@ def get_data():
 
 # --- ALERT EMAIL ---
 @app.route('/send-alert', methods=['POST'])
-async def send_alert():
+def send_alert(): # Changed from async def to def
     try:
         content = request.get_json(force=True)
         current_out_values = content.get("outValues", [])
@@ -401,8 +401,8 @@ async def send_alert():
 
 # --- NEW: Chatbot Query Endpoint ---
 @app.route('/query-qa-data', methods=['POST'])
-def query_qa_data():
-    try: # Ensure this try block has a corresponding except/finally
+def query_qa_data(): # Changed from async def to def
+    try: 
         content = request.get_json(force=True)
         query_type = content.get("query")
         month_param = content.get("month")
@@ -574,6 +574,8 @@ async def get_pending_users():
         return jsonify({'message': 'Unauthorized'}), 403
     try:
         users = db.collection("users").where("status", "==", "pending").stream()
+        # Note: 'stream()' is synchronous in firebase-admin SDK, so no await needed here.
+        # But this function still needs to be 'async def' because it 'awaits' verify_admin_token.
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
     except Exception as e:
         app.logger.error(f"Get pending users failed: {str(e)}", exc_info=True)
@@ -841,7 +843,7 @@ async def get_hospital_qa_data():
 
 # --- Excel Export Endpoint ---
 @app.route('/export-excel', methods=['POST'])
-async def export_excel():
+def export_excel(): # Changed from async def to def
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")

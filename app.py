@@ -402,7 +402,7 @@ async def send_alert():
 # --- NEW: Chatbot Query Endpoint ---
 @app.route('/query-qa-data', methods=['POST'])
 def query_qa_data():
-    try:
+    try: # Ensure this try block has a corresponding except/finally
         content = request.get_json(force=True)
         query_type = content.get("query")
         month_param = content.get("month")
@@ -559,7 +559,7 @@ def query_qa_data():
         else:
             return jsonify({'status': 'error', 'message': 'Unknown query type'}), 400
 
-    except Exception as e:
+    except Exception as e: # <--- This 'except' block correctly closes the 'try'
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)

@@ -6,6 +6,7 @@ import os
 # Retrieve Sentry DSN from environment variable
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
 
+sentry_sdk_configured = False # Flag to track Sentry initialization
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
@@ -16,6 +17,7 @@ if SENTRY_DSN:
         profiles_sample_rate=1.0, # Capture 100% of active samples for profiling
         send_default_pii=True # Enable sending of PII (Personally Identifiable Information)
     )
+    sentry_sdk_configured = True
     print("Sentry initialized successfully.")
 else:
     print("SENTRY_DSN environment variable not set. Sentry not initialized.")
@@ -30,7 +32,7 @@ from email.mime.multipart import MIMEMultipart
 import json
 import logging
 from calendar import monthrange
-from datetime import datetime, timedelta # timedelta is only here if you plan to use it for future ML data fetching. If not, can remove.
+from datetime import datetime, timedelta
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -38,14 +40,6 @@ from firebase_admin import credentials, firestore, auth
 # New imports for Excel export
 import pandas as pd
 from io import BytesIO
-
-# --- Removed ML-related imports (joblib, numpy, prophet) as they are not used yet ---
-# import joblib
-# import numpy as np
-# try:
-#     from prophet import Prophet
-# except ImportError:
-#     Prophet = None
 
 
 app = Flask(__name__)
@@ -68,7 +62,7 @@ APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 def send_notification_email(recipient_email, subject, body):
     if not APP_PASSWORD:
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_message(f"EMAIL_APP_PASSWORD not set. Cannot send notification to {recipient_email}.", level="warning")
         return False
     
@@ -87,19 +81,26 @@ def send_notification_email(recipient_email, subject, body):
         return True
     except Exception as e:
         app.logger.error(f"❌ Email error: {str(e)} for recipient {recipient_email}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture the exception with Sentry
         return False
 
 # --- [FIREBASE INIT] ---
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
 if not firebase_json:
-    if SENTRY_DSN:
+    if sentry_sdk_configured:
         sentry_sdk.capture_message("CRITICAL: FIREBASE_CREDENTIALS environment variable not set.", level="fatal")
     raise Exception("FIREBASE_CREDENTIALS not set")
 firebase_dict = json.loads(firebase_json)
-cred = credentials.Certificate(firebase_dict)
-firebase_admin.initialize_app(cred)
+
+# Check if a default app is already initialized before initializing
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_dict)
+    firebase_admin.initialize_app(cred)
+    app.logger.info("Firebase default app initialized.")
+else:
+    app.logger.info("Firebase default app already initialized, skipping init.")
+
 db = firestore.client()
 
 # Defined once here for consistency
@@ -115,7 +116,7 @@ async def verify_admin_token(id_token):
             return True, uid
     except Exception as e:
         app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture token verification failures
     return False, None
 
@@ -142,7 +143,7 @@ def signup():
         return jsonify({'status': 'success', 'message': 'User registered'}), 200
     except Exception as e:
         app.logger.error(f"Signup failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture signup errors
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -169,7 +170,7 @@ def login():
         }), 200
     except Exception as e:
         app.logger.error(f"Login failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture login errors
         return jsonify({'status': 'error', 'message': 'Login failed'}), 500
 
@@ -211,50 +212,6 @@ def save_data():
         
         # --- Anomaly Detection on newly changed or added data points (PLACEHOLDER) ---
         anomalies_detected = []
-        # today_date_str = datetime.now().strftime('%Y-%m-%d')
-        
-        # This part of the code for ML is commented out for now as it needs proper
-        # ML model setup (training, loading) and feature engineering.
-        # It's here as a placeholder from previous discussion.
-        '''
-        for new_row in converted:
-            energy = new_row.get("energy")
-            new_values = new_row.get("values", [])
-            existing_values = existing_data_map.get(energy, [])
-            
-            day_index = datetime.now().day - 1 # Assuming daily QA is for today
-            
-            if energy in ENERGY_TYPES and day_index < len(new_values):
-                try:
-                    current_value = float(new_values[day_index])
-                    if day_index >= len(existing_values) or float(existing_values[day_index] or 0) != current_value:
-                        
-                        anomaly_model = load_model(center_id, energy, 'anomaly')
-                        if anomaly_model:
-                            # Placeholder for actual feature generation for today's data point
-                            test_features = np.array([[
-                                current_value, 
-                                datetime.now().weekday(), 
-                                datetime.now().day
-                            ]])
-                            
-                            prediction = anomaly_model.predict(test_features)
-                            if prediction[0] == -1: # -1 indicates an outlier/anomaly
-                                anomalies_detected.append({
-                                    'energy': energy,
-                                    'date': today_date_str,
-                                    'value': current_value,
-                                    'type': 'anomaly'
-                                })
-                                app.logger.warning(f"Anomaly detected for {energy} at {center_id} on {today_date_str}: {current_value}%")
-                        else:
-                            app.logger.warning(f"Anomaly model not found for {energy} at {center_id}. Skipping detection.")
-
-                except (ValueError, TypeError) as val_e:
-                    app.logger.warning(f"Non-numeric value encountered for anomaly detection: {val_e}")
-                except Exception as ad_e:
-                    app.logger.error(f"Error during anomaly detection for {energy}: {ad_e}", exc_info=True)
-        '''
         
         if anomalies_detected:
             app.logger.info(f"Anomalies detected during save: {anomalies_detected}")
@@ -262,7 +219,7 @@ def save_data():
         return jsonify({'status': 'success', 'anomalies': anomalies_detected}), 200
     except Exception as e:
         app.logger.error(f"Save data failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture save data errors
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -302,7 +259,7 @@ def get_data():
         return jsonify({'data': table}), 200
     except Exception as e:
         app.logger.error(f"Get data failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture get data errors
         return jsonify({'error': str(e)}), 500
 
@@ -318,14 +275,14 @@ async def send_alert():
 
         if not uid or not month_key:
             app.logger.warning("Missing UID or month key for alert processing.")
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_message("Missing UID or month key for alert processing.", level="warning")
             return jsonify({'status': 'error', 'message': 'Missing UID or month for alert processing'}), 400
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
             app.logger.warning(f"User document not found for UID: {uid} during alert processing.")
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_message(f"User document not found for UID: {uid} during alert processing.", level="warning")
             return jsonify({'status': 'error', 'message': 'User not found for alert processing'}), 404
         user_data = user_doc.to_dict()
@@ -333,12 +290,12 @@ async def send_alert():
 
         if not center_id:
             app.logger.warning(f"Center ID not found for user {uid} during alert processing.")
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_message(f"Center ID not found for user {uid} during alert processing.", level="warning")
             return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
 
         rso_emails = []
-        try: # Nested try for rso_emails fetching
+        try:
             rso_users = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream()
             for rso_user in rso_users:
                 rso_data = rso_user.to_dict()
@@ -347,19 +304,19 @@ async def send_alert():
             
             if not rso_emails:
                 app.logger.info(f"No RSO email found for centerId: {center_id}. Alert not sent to RSO.")
-                if SENTRY_DSN:
+                if sentry_sdk_configured:
                     sentry_sdk.capture_message(f"No RSO email found for centerId: {center_id}. Alert not sent.", level="info")
                 return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200
 
         except Exception as e:
             app.logger.error(f"Error fetching RSO emails for center {center_id}: {str(e)}", exc_info=True)
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_exception(e)
             return jsonify({'status': 'error', 'message': 'Failed to fetch RSO emails'}), 500
 
         if not APP_PASSWORD:
             app.logger.warning("APP_PASSWORD not configured. Cannot send email.")
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_message("APP_PASSWORD not configured. Cannot send alert email.", level="warning")
             return jsonify({'status': 'email_credentials_missing', 'message': 'Email credentials missing'}), 500
 
@@ -401,7 +358,6 @@ async def send_alert():
         else:
             message_body += "All LINAC QA values are currently within tolerance for this month.\n"
         
-        # Consistently using the send_notification_email helper function here
         email_sent = send_notification_email(", ".join(rso_emails), f"⚠ LINAC QA Status - {hospital} ({month_key})", message_body)
 
         if email_sent:
@@ -410,13 +366,13 @@ async def send_alert():
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
         else:
             app.logger.error("Failed to send alert email via helper function.")
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_message("Failed to send alert email via helper function.", level="error")
             return jsonify({'status': 'email_send_error', 'message': 'Failed to send email via helper function.'}), 500
 
     except Exception as e:
         app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -431,7 +387,7 @@ def query_qa_data():
         
         # Additional parameters for specific queries
         energy_type = content.get("energy_type")
-        date_param = content.get("date") # Expected format:YYYY-MM-DD
+        date_param = content.get("date")
 
         if not query_type or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query type, month, or UID'}), 400
@@ -465,7 +421,7 @@ def query_qa_data():
                     try:
                         n = float(value)
                         if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
-                                if i < len(date_strings): # Ensure index is valid
+                                if i < len(date_strings):
                                     out_dates.add(date_strings[i])
                     except (ValueError, TypeError):
                         pass
@@ -514,7 +470,7 @@ def query_qa_data():
 
             except ValueError:
                 app.logger.error(f"Invalid date format in /query-qa-data: {date_param}", exc_info=True)
-                if SENTRY_DSN:
+                if sentry_sdk_configured:
                     sentry_sdk.capture_message(f"Invalid date format in /query-qa-data: {date_param}", level="warning")
                 return jsonify({'status': 'error', 'message': 'Invalid date format. Please useYYYY-MM-DD.'}), 400
 
@@ -525,7 +481,7 @@ def query_qa_data():
             for row in data_rows:
                 if row.get("energy") == energy_type:
                     values = row.get("values", [])
-                    if day_index < len(values): # Ensure day_index is within the bounds of collected values
+                    if day_index < len(values):
                         found_value = values[day_index]
                         try:
                             n = float(found_value)
@@ -562,7 +518,7 @@ def query_qa_data():
                 for i, value in enumerate(values):
                     try:
                         n = float(value)
-                        if abs(n) > 1.8 and abs(n) <= 2.0: # 'Warning' range
+                        if abs(n) > 1.8 and abs(n) <= 2.0:
                             if i < len(date_strings):
                                 warning_entries.append({
                                     "energy": energy_type_row,
@@ -582,7 +538,7 @@ def query_qa_data():
 
     except Exception as e:
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -598,7 +554,7 @@ async def get_pending_users():
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
     except Exception as e:
         app.logger.error(f"Get pending users failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
@@ -612,7 +568,7 @@ async def get_all_users():
 
     status_filter = request.args.get('status')
     hospital_filter = request.args.get('hospital')
-    search_term = request.args.get('search') # For general search (email, name, role, hospital)
+    search_term = request.args.get('search')
 
     try:
         users_query = db.collection("users")
@@ -622,17 +578,14 @@ async def get_all_users():
         
         if hospital_filter:
             users_query = users_query.where("hospital", "==", hospital_filter)
-            # Firestore limitations: Cannot combine '==' queries on different fields without a composite index.
-            # For general search_term, we'll fetch all matching current filters and then filter in Python.
 
         users_stream = users_query.stream()
         
         all_users = []
         for doc in users_stream:
             user_data = doc.to_dict()
-            user_data['uid'] = doc.id # Add UID to the dictionary
+            user_data['uid'] = doc.id
 
-            # Apply general search_term filtering in Python
             if search_term:
                 search_term_lower = search_term.lower()
                 if not (search_term_lower in user_data.get('name', '').lower() or
@@ -646,7 +599,7 @@ async def get_all_users():
         return jsonify(all_users), 200
     except Exception as e:
         app.logger.error(f"Error loading all users: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
@@ -655,14 +608,17 @@ async def get_all_users():
 @app.route('/admin/update-user-status', methods=['POST'])
 async def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid = await verify_admin_token(token)
+    is_admin, admin_uid_from_token = await verify_admin_token(token) # Get admin_uid from token here
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
         
-        # New fields that can be updated
+        # Use admin_uid from token verification for audit logging.
+        # The frontend will also send it, which can be a fallback/double check.
+        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token) 
+
         new_status = content.get("status")
         new_role = content.get("role")
         new_hospital = content.get("hospital")
@@ -677,17 +633,54 @@ async def update_user_status():
             updates["role"] = new_role
         if new_hospital is not None and new_hospital.strip() != "":
             updates["hospital"] = new_hospital
-            updates["centerId"] = new_hospital
+            updates["centerId"] = new_hospital # Ensure centerId is updated with hospital
 
         if not updates:
             return jsonify({'message': 'No valid fields provided for update'}), 400
 
         ref = db.collection("users").document(uid)
+        
+        # Get old user data before update for logging
+        old_user_doc = ref.get()
+        old_user_data = old_user_doc.to_dict() if old_user_doc.exists else {}
+
         ref.update(updates)
+
+        # Log the audit event
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP, # Use server timestamp
+            "adminUid": requesting_admin_uid,
+            "action": "user_update",
+            "targetUserUid": uid,
+            "changes": {},
+            "oldData": {},
+            "newData": {}
+        }
+
+        # Populate changes, oldData, newData for audit log
+        if "status" in updates:
+            audit_entry["changes"]["status"] = {"old": old_user_data.get("status"), "new": updates["status"]}
+            audit_entry["oldData"]["status"] = old_user_data.get("status")
+            audit_entry["newData"]["status"] = updates["status"]
+        if "role" in updates:
+            audit_entry["changes"]["role"] = {"old": old_user_data.get("role"), "new": updates["role"]}
+            audit_entry["oldData"]["role"] = old_user_data.get("role")
+            audit_entry["newData"]["role"] = updates["role"]
+        if "hospital" in updates:
+            audit_entry["changes"]["hospital"] = {"old": old_user_data.get("hospital"), "new": updates["hospital"]}
+            audit_entry["oldData"]["hospital"] = old_user_data.get("hospital")
+            audit_entry["newData"]["hospital"] = updates["hospital"]
+        
+        # Add basic info about the target user
+        audit_entry["targetUserEmail"] = old_user_data.get("email", "N/A")
+        audit_entry["targetUserName"] = old_user_data.get("name", "N/A")
+
+
+        db.collection("audit_logs").add(audit_entry)
+        app.logger.info(f"Audit: User {uid} updated by {requesting_admin_uid}")
 
         # Re-fetch user data to send email based on latest status
         updated_user_data = ref.get().to_dict()
-        # Consistently using the send_notification_email helper function here
         if updated_user_data.get("email"):
             subject = "LINAC QA Account Update"
             body = f"Your LINAC QA account details have been updated."
@@ -708,13 +701,13 @@ async def update_user_status():
             send_notification_email(updated_user_data["email"], subject, body)
         else:
             app.logger.warning(f"No email for user {uid} found to send update notification.")
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_message(f"No email for user {uid} found to send update notification.", level="warning")
 
         return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
     except Exception as e:
         app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
@@ -722,7 +715,7 @@ async def update_user_status():
 @app.route('/admin/delete-user', methods=['DELETE'])
 async def delete_user():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
+    is_admin, admin_uid_from_token = await verify_admin_token(token) # Get admin_uid here
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -730,8 +723,15 @@ async def delete_user():
         content = request.get_json(force=True)
         uid_to_delete = content.get("uid")
 
+        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token)
+
         if not uid_to_delete:
             return jsonify({'message': 'Missing UID for deletion'}), 400
+
+        # Get user data before deletion for logging
+        user_doc_ref = db.collection("users").document(uid_to_delete)
+        user_doc = user_doc_ref.get()
+        user_data_to_log = user_doc.to_dict() if user_doc.exists else {}
 
         # 1. Delete user from Firebase Authentication
         try:
@@ -740,32 +740,39 @@ async def delete_user():
         except Exception as e:
             if "User record not found" in str(e):
                 app.logger.warning(f"Firebase Auth user {uid_to_delete} not found, proceeding with Firestore deletion.")
-                if SENTRY_DSN:
+                if sentry_sdk_configured:
                     sentry_sdk.capture_message(f"Firebase Auth user {uid_to_delete} not found during deletion attempt.", level="warning")
             else:
                 app.logger.error(f"Error deleting Firebase Auth user {uid_to_delete}: {str(e)}", exc_info=True)
-                if SENTRY_DSN:
+                if sentry_sdk_configured:
                     sentry_sdk.capture_exception(e)
                 return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
 
         # 2. Delete user's document from Firestore
-        user_doc_ref = db.collection("users").document(uid_to_delete)
-        user_doc = user_doc_ref.get() # Get doc to log data before deleting
-
         if user_doc.exists:
-            user_data = user_doc.to_dict()
             user_doc_ref.delete()
-            app.logger.info(f"Firestore user document {uid_to_delete} ({user_data.get('email')}) deleted.")
+            app.logger.info(f"Firestore user document {uid_to_delete} ({user_data_to_log.get('email')}) deleted.")
         else:
             app.logger.warning(f"Firestore user document {uid_to_delete} not found (already deleted?).")
-            if SENTRY_DSN:
+            if sentry_sdk_configured:
                 sentry_sdk.capture_message(f"Firestore user document {uid_to_delete} not found during deletion attempt.", level="warning")
         
+        # Log the audit event for deletion
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "adminUid": requesting_admin_uid,
+            "action": "user_deletion",
+            "targetUserUid": uid_to_delete,
+            "deletedUserData": user_data_to_log
+        }
+        db.collection("audit_logs").add(audit_entry)
+        app.logger.info(f"Audit: User {uid_to_delete} deleted by {requesting_admin_uid}")
+
         return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
 
     except Exception as e:
         app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
@@ -778,7 +785,7 @@ async def get_hospital_qa_data():
         return jsonify({'message': 'Unauthorized'}), 403
 
     hospital_id = request.args.get('hospitalId')
-    month_param = request.args.get('month') # Expected format:YYYY-MM
+    month_param = request.args.get('month')
 
     if not hospital_id or not month_param:
         return jsonify({'message': 'Missing hospitalId or month parameter'}), 400
@@ -808,12 +815,12 @@ async def get_hospital_qa_data():
 
     except ValueError:
         app.logger.error(f"Invalid month format in /admin/hospital-data: {month_param}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_message(f"Invalid month format in /admin/hospital-data: {month_param}", level="warning")
         return jsonify({'message': 'Invalid month format. Please useYYYY-MM.'}), 400
     except Exception as e:
         app.logger.error(f"Error fetching hospital QA data for admin: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to fetch data: {str(e)}"}), 500
 
@@ -823,7 +830,7 @@ async def export_excel():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-        month_param = content.get("month") #YYYY-MM
+        month_param = content.get("month")
 
         if not uid or not month_param:
             return jsonify({'error': 'Missing UID or month parameter'}), 400
@@ -876,14 +883,14 @@ async def export_excel():
 
     except Exception as e:
         app.logger.error(f"Error exporting Excel file: {str(e)}", exc_info=True)
-        if SENTRY_DSN:
+        if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'error': f"Failed to export Excel file: {str(e)}"}), 500
 
 # --- TEMPORARY DEBUGGING ROUTE FOR SENTRY - REMOVE AFTER TESTING ---
 @app.route("/debug-sentry")
 def trigger_error():
-    division_by_zero = 1 / 0  # This will intentionally cause a ZeroDivisionError
+    division_by_zero = 1 / 0
     return "Hello, world!"
 
 # --- INDEX ---

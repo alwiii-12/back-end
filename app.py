@@ -324,9 +324,7 @@ async def send_alert():
 
         rso_emails = []
         try:
-            rso_users = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream()
-            # UserWarning: Detected filter using positional arguments. Prefer using the 'filter' keyword argument instead.
-            # Fix: rso_users = db.collection('users').filter(firestore.FieldFilter('centerId', '==', center_id)).filter(firestore.FieldFilter('role', '==', 'RSO')).stream()
+            rso_users = db.collection('users').filter(firestore.FieldFilter('centerId', '==', center_id)).filter(firestore.FieldFilter('role', '==', 'RSO')).stream() # Corrected filter usage
             for rso_user in rso_users:
                 rso_data = rso_user.to_dict()
                 if 'email' in rso_data and rso_data['email']:
@@ -580,7 +578,7 @@ async def get_pending_users():
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
-        users = db.collection("users").where(filter=firestore.FieldFilter("status", "==", "pending")).stream() # Corrected filter usage
+        users = db.collection("users").filter(firestore.FieldFilter("status", "==", "pending")).stream() # Corrected filter usage
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
     except Exception as e:
         app.logger.error(f"Get pending users failed: {str(e)}", exc_info=True)
@@ -807,8 +805,11 @@ async def delete_user():
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 # --- ADMIN: GET HOSPITAL QA DATA ---
-@app.route('/admin/hospital-data', methods=['GET'])
+@app.route('/admin/hospital-data', methods=['GET', 'OPTIONS']) # ADDED 'OPTIONS' METHOD HERE
 async def get_hospital_qa_data():
+    if request.method == 'OPTIONS': # Handle CORS preflight explicitly if needed
+        return '', 200
+
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
     is_admin, _ = await verify_admin_token(token)
     if not is_admin:

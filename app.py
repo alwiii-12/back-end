@@ -819,8 +819,7 @@ async def get_hospital_qa_data():
         if doc_snap.exists:
             firestore_data = doc_snap.to_dict().get("data", [])
             for row in firestore_data:
-                energy = row.get("energy")
-                values = row.get("values", [])
+                energy = row.get("energy"), values = row.get("values", [])
                 if energy in results_data:
                     results_data[energy] = (values + [''] * num_days)[:num_days]
         

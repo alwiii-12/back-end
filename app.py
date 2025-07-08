@@ -399,10 +399,6 @@ def send_alert(): # Changed from async def to def
                 sentry_sdk.capture_message("Failed to send alert email via helper function.", level="error")
             return jsonify({'status': 'email_send_error', 'message': 'Failed to send email via helper function.'}), 500
 
-# --- NEW: Chatbot Query Endpoint ---
-@app.route('/query-qa-data', methods=['POST'])
-def query_qa_data(): # Changed from async def to def
-    try: 
         content = request.get_json(force=True)
         query_type = content.get("query")
         month_param = content.get("month")

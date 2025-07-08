@@ -819,8 +819,8 @@ async def get_hospital_qa_data():
             for row in firestore_data:
                 energy = row.get("energy")
                 values = row.get("values", [])
-                if energy in results_data:
-                    results_data[energy] = (values + [''] * num_days)[:num_days]
+                if energy in energy_dict:
+                    energy_dict[energy] = (values + [''] * num_days)[:num_days]
         
         final_table_data = []
         for energy_type in ENERGY_TYPES:
@@ -871,7 +871,7 @@ async def export_excel():
             for row in doc.to_dict().get("data", []):
                 energy, values = row.get("energy"), row.get("values", [])
                 if energy in energy_dict:
-                    energy_dict[energy] = (values + [''] * num_days)[:num_days]
+                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
         
         data_for_df = []
         columns = ['Energy']

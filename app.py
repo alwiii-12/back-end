@@ -856,6 +856,60 @@ async def get_hospital_qa_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to fetch data: {str(e)}"}), 500
 
+# --- ADMIN: GET AUDIT LOGS ---
+@app.route('/admin/audit-logs', methods=['GET', 'OPTIONS']) # ADDED 'OPTIONS' METHOD HERE
+async def get_audit_logs():
+    if request.method == 'OPTIONS': # Handle CORS preflight explicitly
+        return '', 200
+
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = await verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    hospital_filter = request.args.get('hospitalId')
+    date_filter_str = request.args.get('date') # Single date filter
+    action_filter = request.args.get('action')
+
+    try:
+        logs_query = db.collection("audit_logs")
+
+        if hospital_filter:
+            logs_query = logs_query.filter(firestore.FieldFilter('hospital', '==', hospital_filter))
+        if action_filter:
+            logs_query = logs_query.filter(firestore.FieldFilter('action', '==', action_filter))
+        if date_filter_str:
+            # Filter for a specific day (start of day to end of day)
+            start_of_day = datetime.strptime(date_filter_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = start_of_day + timedelta(days=1) - timedelta(microseconds=1)
+            
+            logs_query = logs_query.filter(firestore.FieldFilter('timestamp', '>=', start_of_day))
+            logs_query = logs_query.filter(firestore.FieldFilter('timestamp', '<=', end_of_day))
+
+        logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING) # Latest first
+
+        logs_stream = logs_query.stream()
+        all_logs = []
+        for doc in logs_stream:
+            log_data = doc.to_dict()
+            # Convert Firestore Timestamp to string for JSON serialization
+            if 'timestamp' in log_data and hasattr(log_data['timestamp'], 'strftime'):
+                log_data['timestamp'] = log_data['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+            all_logs.append(log_data)
+
+        return jsonify({'status': 'success', 'logs': all_logs}), 200
+
+    except ValueError:
+        app.logger.error(f"Invalid date format for audit logs: {date_filter_str}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_message(f"Invalid date format for audit logs: {date_filter_str}", level="warning")
+        return jsonify({'message': 'Invalid date format for audit logs. Please use YYYY-MM-DD.'}), 400
+    except Exception as e:
+        app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': f"Failed to fetch audit logs: {str(e)}"}), 500
+
 # --- Excel Export Endpoint ---
 @app.route('/export-excel', methods=['POST'])
 async def export_excel():

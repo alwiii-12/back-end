@@ -174,6 +174,34 @@ def login():
             sentry_sdk.capture_exception(e) # Capture login errors
         return jsonify({'status': 'error', 'message': 'Login failed'}), 500
 
+# --- NEW: Generic Log Event Endpoint ---
+@app.route('/log_event', methods=['POST', 'OPTIONS']) # ADDED 'OPTIONS' METHOD HERE
+def log_event():
+    # For OPTIONS requests (preflight), Flask-CORS handles it automatically.
+    # No custom logic is usually needed here for OPTIONS.
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    try:
+        event_data = request.get_json(force=True)
+        
+        # Ensure minimum required fields for an audit log
+        if not event_data.get("action") or not event_data.get("userUid"):
+            app.logger.warning("Attempted to log event with missing action or userUid.")
+            return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
+
+        # Add server timestamp if not provided (frontend usually won't send it)
+        event_data["timestamp"] = firestore.SERVER_TIMESTAMP
+        
+        db.collection("audit_logs").add(event_data)
+        app.logger.info(f"Audit: Logged event '{event_data.get('action')}' for UID {event_data.get('userUid')}.")
+        return jsonify({'status': 'success', 'message': 'Event logged successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Error logging event: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 # --- SAVE DATA ---
 @app.route('/save', methods=['POST'])
 def save_data():
@@ -802,6 +830,7 @@ async def get_hospital_qa_data():
         if doc_snap.exists:
             firestore_data = doc_snap.to_dict().get("data", [])
             for row in firestore_data:
+                # Corrected here: removed duplicate/problematic assignment
                 energy = row.get("energy")
                 values = row.get("values", [])
                 if energy in results_data:

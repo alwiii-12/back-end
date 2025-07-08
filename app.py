@@ -147,19 +147,25 @@ def signup():
             sentry_sdk.capture_exception(e) # Capture signup errors
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- LOGIN ---
+# --- LOGIN (This endpoint primarily serves user data AFTER Firebase Auth success.) ---
 @app.route('/login', methods=['POST'])
 def login():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid", "").strip()
+
         if not uid:
             return jsonify({'status': 'error', 'message': 'Missing UID'}), 400
+
         user_ref = db.collection("users").document(uid)
         user_doc = user_ref.get()
+
         if not user_doc.exists:
+            # Note: Failed logins for "user not found" are now logged by frontend after auth.
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
+
         user_data = user_doc.to_dict()
+
         return jsonify({
             'status': 'success',
             'hospital': user_data.get("hospital", ""),
@@ -169,10 +175,33 @@ def login():
             'status': user_data.get("status", "unknown")
         }), 200
     except Exception as e:
-        app.logger.error(f"Login failed: {str(e)}", exc_info=True)
+        app.logger.error(f"Login data retrieval failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e) # Capture login errors
-        return jsonify({'status': 'error', 'message': 'Login failed'}), 500
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': 'Login data retrieval failed'}), 500
+
+# --- NEW: Generic Log Event Endpoint ---
+@app.route('/log_event', methods=['POST'])
+async def log_event():
+    try:
+        event_data = request.get_json(force=True)
+        
+        # Ensure minimum required fields for an audit log
+        if not event_data.get("action") or not event_data.get("userUid"):
+            app.logger.warning("Attempted to log event with missing action or userUid.")
+            return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
+
+        # Add server timestamp if not provided (frontend usually won't send it)
+        event_data["timestamp"] = firestore.SERVER_TIMESTAMP
+        
+        db.collection("audit_logs").add(event_data)
+        app.logger.info(f"Audit: Logged event '{event_data.get('action')}' for UID {event_data.get('userUid')}.")
+        return jsonify({'status': 'success', 'message': 'Event logged successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Error logging event: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- SAVE DATA ---
 @app.route('/save', methods=['POST'])
@@ -369,12 +398,6 @@ async def send_alert():
             if sentry_sdk_configured:
                 sentry_sdk.capture_message("Failed to send alert email via helper function.", level="error")
             return jsonify({'status': 'email_send_error', 'message': 'Failed to send email via helper function.'}), 500
-
-    except Exception as e:
-        app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- NEW: Chatbot Query Endpoint ---
 @app.route('/query-qa-data', methods=['POST'])
@@ -608,15 +631,13 @@ async def get_all_users():
 @app.route('/admin/update-user-status', methods=['POST'])
 async def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = await verify_admin_token(token) # Get admin_uid from token here
+    is_admin, admin_uid_from_token = await verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
         
-        # Use admin_uid from token verification for audit logging.
-        # The frontend will also send it, which can be a fallback/double check.
         requesting_admin_uid = content.get("admin_uid", admin_uid_from_token) 
 
         new_status = content.get("status")
@@ -633,22 +654,20 @@ async def update_user_status():
             updates["role"] = new_role
         if new_hospital is not None and new_hospital.strip() != "":
             updates["hospital"] = new_hospital
-            updates["centerId"] = new_hospital # Ensure centerId is updated with hospital
+            updates["centerId"] = new_hospital
 
         if not updates:
             return jsonify({'message': 'No valid fields provided for update'}), 400
 
         ref = db.collection("users").document(uid)
         
-        # Get old user data before update for logging
         old_user_doc = ref.get()
         old_user_data = old_user_doc.to_dict() if old_user_doc.exists else {}
 
         ref.update(updates)
 
-        # Log the audit event
         audit_entry = {
-            "timestamp": firestore.SERVER_TIMESTAMP, # Use server timestamp
+            "timestamp": firestore.SERVER_TIMESTAMP,
             "adminUid": requesting_admin_uid,
             "action": "user_update",
             "targetUserUid": uid,
@@ -657,7 +676,6 @@ async def update_user_status():
             "newData": {}
         }
 
-        # Populate changes, oldData, newData for audit log
         if "status" in updates:
             audit_entry["changes"]["status"] = {"old": old_user_data.get("status"), "new": updates["status"]}
             audit_entry["oldData"]["status"] = old_user_data.get("status")
@@ -671,15 +689,12 @@ async def update_user_status():
             audit_entry["oldData"]["hospital"] = old_user_data.get("hospital")
             audit_entry["newData"]["hospital"] = updates["hospital"]
         
-        # Add basic info about the target user
         audit_entry["targetUserEmail"] = old_user_data.get("email", "N/A")
         audit_entry["targetUserName"] = old_user_data.get("name", "N/A")
-
 
         db.collection("audit_logs").add(audit_entry)
         app.logger.info(f"Audit: User {uid} updated by {requesting_admin_uid}")
 
-        # Re-fetch user data to send email based on latest status
         updated_user_data = ref.get().to_dict()
         if updated_user_data.get("email"):
             subject = "LINAC QA Account Update"
@@ -711,11 +726,11 @@ async def update_user_status():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-# --- ADMIN: DELETE USER ---
+# --- ADMIN: DELETE USER (NO CHANGE HERE FROM PREVIOUS AUDIT) ---
 @app.route('/admin/delete-user', methods=['DELETE'])
 async def delete_user():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = await verify_admin_token(token) # Get admin_uid here
+    is_admin, admin_uid_from_token = await verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -856,7 +871,7 @@ async def export_excel():
             for row in doc.to_dict().get("data", []):
                 energy, values = row.get("energy"), row.get("values", [])
                 if energy in energy_dict:
-                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
+                    energy_dict[energy] = (values + [''] * num_days)[:num_days]
         
         data_for_df = []
         columns = ['Energy']

@@ -175,7 +175,7 @@ def login():
         return jsonify({'status': 'error', 'message': 'Login failed'}), 500
 
 # --- NEW: Generic Log Event Endpoint ---
-@app.route('/log_event', methods=['POST', 'OPTIONS']) # ADDED 'OPTIONS' METHOD HERE
+@app.route('/log_event', methods=['POST', 'OPTIONS'])
 def log_event():
     # For OPTIONS requests (preflight), Flask-CORS handles it automatically.
     # No custom logic is usually needed here for OPTIONS.
@@ -324,7 +324,11 @@ async def send_alert():
 
         rso_emails = []
         try:
-            rso_users = db.collection('users').filter(firestore.FieldFilter('centerId', '==', center_id)).filter(firestore.FieldFilter('role', '==', 'RSO')).stream() # Corrected filter usage
+            # CORRECTED: Use .where() instead of .filter()
+            rso_users = db.collection('users') \
+                          .where('centerId', '==', center_id) \
+                          .where('role', '==', 'RSO') \
+                          .stream()
             for rso_user in rso_users:
                 rso_data = rso_user.to_dict()
                 if 'email' in rso_data and rso_data['email']:
@@ -578,7 +582,8 @@ async def get_pending_users():
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
-        users = db.collection("users").filter(firestore.FieldFilter("status", "==", "pending")).stream() # Corrected filter usage
+        # CORRECTED: Use .where() instead of .filter()
+        users = db.collection("users").where('status', '==', "pending").stream()
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
     except Exception as e:
         app.logger.error(f"Get pending users failed: {str(e)}", exc_info=True)
@@ -602,10 +607,12 @@ async def get_all_users():
         users_query = db.collection("users")
 
         if status_filter:
-            users_query = users_query.filter(firestore.FieldFilter("status", "==", status_filter)) # Corrected filter usage
+            # CORRECTED: Use .where() instead of .filter()
+            users_query = users_query.where('status', '==', status_filter)
         
         if hospital_filter:
-            users_query = users_query.filter(firestore.FieldFilter("hospital", "==", hospital_filter)) # Corrected filter usage
+            # CORRECTED: Use .where() instead of .filter()
+            users_query = users_query.where('hospital', '==', hospital_filter)
 
         users_stream = users_query.stream()
         
@@ -805,7 +812,7 @@ async def delete_user():
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 # --- ADMIN: GET HOSPITAL QA DATA ---
-@app.route('/admin/hospital-data', methods=['GET', 'OPTIONS']) # ADDED 'OPTIONS' METHOD HERE
+@app.route('/admin/hospital-data', methods=['GET', 'OPTIONS'])
 async def get_hospital_qa_data():
     if request.method == 'OPTIONS': # Handle CORS preflight explicitly if needed
         return '', 200
@@ -833,7 +840,6 @@ async def get_hospital_qa_data():
         if doc_snap.exists:
             firestore_data = doc_snap.to_dict().get("data", [])
             for row in firestore_data:
-                # Corrected here: removed duplicate/problematic assignment
                 energy = row.get("energy")
                 values = row.get("values", [])
                 if energy in results_data:
@@ -857,7 +863,7 @@ async def get_hospital_qa_data():
         return jsonify({'message': f"Failed to fetch data: {str(e)}"}), 500
 
 # --- ADMIN: GET AUDIT LOGS ---
-@app.route('/admin/audit-logs', methods=['GET', 'OPTIONS']) # ADDED 'OPTIONS' METHOD HERE
+@app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
 async def get_audit_logs():
     if request.method == 'OPTIONS': # Handle CORS preflight explicitly
         return '', 200
@@ -875,16 +881,19 @@ async def get_audit_logs():
         logs_query = db.collection("audit_logs")
 
         if hospital_filter:
-            logs_query = logs_query.filter(firestore.FieldFilter('hospital', '==', hospital_filter))
+            # CORRECTED: Use .where() instead of .filter()
+            logs_query = logs_query.where('hospital', '==', hospital_filter)
         if action_filter:
-            logs_query = logs_query.filter(firestore.FieldFilter('action', '==', action_filter))
+            # CORRECTED: Use .where() instead of .filter()
+            logs_query = logs_query.where('action', '==', action_filter)
         if date_filter_str:
             # Filter for a specific day (start of day to end of day)
             start_of_day = datetime.strptime(date_filter_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0)
             end_of_day = start_of_day + timedelta(days=1) - timedelta(microseconds=1)
             
-            logs_query = logs_query.filter(firestore.FieldFilter('timestamp', '>=', start_of_day))
-            logs_query = logs_query.filter(firestore.FieldFilter('timestamp', '<=', end_of_day))
+            # CORRECTED: Use .where() instead of .filter()
+            logs_query = logs_query.where('timestamp', '>=', start_of_day)
+            logs_query = logs_query.where('timestamp', '<=', end_of_day)
 
         logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING) # Latest first
 
@@ -903,7 +912,7 @@ async def get_audit_logs():
         app.logger.error(f"Invalid date format for audit logs: {date_filter_str}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_message(f"Invalid date format for audit logs: {date_filter_str}", level="warning")
-        return jsonify({'message': 'Invalid date format for audit logs. Please use YYYY-MM-DD.'}), 400
+        return jsonify({'message': 'Invalid date format for audit logs. Please useYYYY-MM-DD.'}), 400
     except Exception as e:
         app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
         if sentry_sdk_configured:

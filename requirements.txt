@@ -6,3 +6,5 @@ pandas
 openpyxl
 sentry-sdk[flask]
 joblib
+spacy
+numpy # Added for numerical operations (e.g., average, min/max)

@@ -2,7 +2,7 @@ services:
   - type: web
     name: backend-results
     env: python
-    # REMOVE postBuildCommand: "./post_deploy.sh"
-    buildCommand: "./build.sh" # CHANGE THIS LINE
+    # Change buildCommand to use custom build.sh script
+    buildCommand: "./post_deploy.sh" # CHANGED: Now using post_deploy.sh for build and spacy model download
     startCommand: gunicorn app:app
     envVars: []

@@ -49,13 +49,16 @@ from collections import defaultdict
 
 # Load SpaCy model once at startup
 try:
-    nlp = spacy.load("en_core_web_sm")
-    print("SpaCy model 'en_core_web_sm' loaded successfully.")
-except OSError:
-    print("SpaCy model 'en_core_web_sm' not found. Please run 'python -m spacy download en_core_web_sm'")
+    # UPDATED: Specify the data path for spacy.load() for Render deployment
+    nlp = spacy.load(".venv/share/spacy/en_core_web_sm")
+    print("SpaCy model 'en_core_web_sm' loaded successfully from custom path.")
+except OSError as e: # Catch the specific OSError if model files are not found
+    print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
     print("Attempting to load without model, some NLP features might be limited.")
-    # Fallback if model isn't downloaded (though post_deploy.sh should handle this)
     nlp = None 
+except Exception as e: # Catch any other unexpected errors during load
+    print(f"An unexpected error occurred during SpaCy model loading: {e}")
+    nlp = None
 
 
 app = Flask(__name__)
@@ -432,26 +435,27 @@ def query_qa_data():
         month_param = content.get("month")
         uid = content.get("uid")
         
-        # Additional parameters for specific queries (can be extracted by NLP or provided)
-        # These are now populated by NLP below, but can be overridden if provided by frontend
+        # Parameters that can be extracted by NLP or provided as fallback
         energy_type = content.get("energy_type") 
         date_param = content.get("date")
 
         if not user_query_text or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query text, month, or UID'}), 400
 
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        user_data = user_doc.to_dict()
-        center_id = user_data.get("centerId")
-
-        if not center_id:
-            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
-
-        # Parse the user query with SpaCy if NLP is loaded
-        doc = None
-        if nlp:
+        # --- NEW: Check if NLP model is loaded first ---
+        if nlp is None:
+            # Fallback to simple keyword matching if NLP model isn't available
+            lower_case_query = user_query_text.lower()
+            if "out of tolerance dates" in lower_case_query:
+                query_type = "out_of_tolerance_dates"
+            elif "warning values" in lower_case_query:
+                query_type = "warning_values_for_month"
+            # Add simple fallbacks for other queries if you want them to work without NLP
+            # For now, if NLP is None and no direct keyword match, return an error.
+            else:
+                return jsonify({'status': 'error', 'message': 'Chatbot is currently in limited mode. Please use exact phrases like "Out of tolerance dates" or "List all warning values".'}), 503
+        else:
+            # Parse the user query with SpaCy if NLP is loaded
             doc = nlp(user_query_text.lower())
             
             # Attempt to extract energy type and date from NLP entities/tokens
@@ -462,47 +466,71 @@ def query_qa_data():
                     if clean_token in [e.replace(" ", "") for e in ENERGY_TYPES]:
                         energy_type = clean_token
                         break
-            
+                # Fallback to simple regex if SpaCy entities don't catch it
+                if not energy_type:
+                    energy_match_regex = re.search(r'(6x|10x|15x|6x fff|10x fff|6e|9e|12e|15e|18e)', user_query_text.lower())
+                    if energy_match_regex:
+                        energy_type = energy_match_regex.group(0).upper().replace(" ", "")
+
             if not date_param: # Only try to extract if not already provided
-                # Look for date patterns or entities
                 for ent in doc.ents:
                     if ent.label_ == "DATE":
                         try:
-                            # Try parsing various common date formats
-                            # Example: "July 10th, 2025"
-                            dt_obj = datetime.strptime(ent.text, "%B %d, %Y")
-                            date_param = dt_obj.strftime("%Y-%m-%d")
-                            break
-                        except ValueError:
-                            try:
-                                # Example: "July 10, 2025"
-                                dt_obj = datetime.strptime(ent.text, "%B %d, %Y")
-                                date_param = dt_obj.strftime("%Y-%m-%d")
-                                break
-                            except ValueError:
+                            # Attempt to parse extracted date string from various formats
+                            # This needs to be robust for varied user inputs
+                            parsed_date = None
+                            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%d-%m-%Y", "%m/%d/%Y"):
                                 try:
-                                    # Example: "10-07-2025" or "07/10/2025" or "2025-07-10"
-                                    # This regex is a fallback if SpaCy's entity recognition isn't perfect for the date format
-                                    date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{4}|\d{1,2}(?:st|nd|rd|th)? \w+ \d{4})', ent.text)
-                                    if date_match_regex:
-                                        date_str = date_match_regex.group(1)
-                                        # Attempt to parse extracted date string
-                                        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%d %B %Y"): # Add more formats as needed
-                                            try:
-                                                dt_obj = datetime.strptime(date_str, fmt)
-                                                date_param = dt_obj.strftime("%Y-%m-%d")
-                                                break
-                                            except ValueError:
-                                                pass
-                                    if date_param: break # If date was successfully parsed from entity, break outer loop
+                                    parsed_date = datetime.strptime(ent.text, fmt)
+                                    break
                                 except ValueError:
                                     pass
-
-                # Final fallback to regex if NLP entity or initial parsing failed
+                            if parsed_date:
+                                date_param = parsed_date.strftime("%Y-%m-%d")
+                                break
+                        except Exception: # Catch any parsing errors for the entity
+                            pass
+                # Fallback to regex if NLP entity not found or failed to parse
                 if not date_param:
                     date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
                     if date_match_regex:
                         date_param = date_match_regex.group(1)
+
+            # Determine query type based on keywords and extracted entities
+            # Prioritize specific queries based on keywords
+            if "out of tolerance dates" in user_query_text.lower() or "out of spec dates" in user_query_text.lower():
+                query_type = "out_of_tolerance_dates"
+            elif "value for" in user_query_text.lower() or "status for" in user_query_text.lower():
+                query_type = "value_on_date"
+            elif ("show all" in user_query_text.lower() or "all data" in user_query_text.lower()) and energy_type:
+                query_type = "energy_data_for_month"
+            elif "warning values" in user_query_text.lower() or "warnings for" in user_query_text.lower():
+                query_type = "warning_values_for_month"
+            elif "average deviation" in user_query_text.lower():
+                query_type = "average_deviation"
+            elif "max value" in user_query_text.lower() or "highest value" in user_query_text.lower():
+                query_type = "max_value"
+            elif "min value" in user_query_text.lower() or "lowest value" in user_query_text.lower():
+                query_type = "min_value"
+            elif ("all values for" in user_query_text.lower() or "all energies on" in user_query_text.lower()) and date_param:
+                query_type = "all_values_on_date"
+            elif "hi" in user_query_text.lower() or "hello" in user_query_text.lower() or "hey" in user_query_text.lower():
+                query_type = "greeting"
+            elif "how are you" in user_query_text.lower():
+                query_type = "how_are_you"
+            elif "thank you" in user_query_text.lower() or "thanks" in user_query_text.lower():
+                query_type = "thank_you"
+            else:
+                query_type = "unknown"
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+
+        if not center_id:
+            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
 
         # Helper to fetch current month's data
         def get_current_month_qa_data(c_id, m_param):
@@ -515,10 +543,7 @@ def query_qa_data():
         data_rows_current_month = get_current_month_qa_data(center_id, month_param)
 
         # --- Query Logic (Expanded) ---
-        query_text_lower = user_query_text.lower() # Use original query text for keyword matching fallback
-
-        # Prioritize exact or strong matches first
-        if "out of tolerance dates" in query_text_lower:
+        if query_type == "out_of_tolerance_dates":
             year, mon = map(int, month_param.split("-"))
             _, num_days = monthrange(year, mon)
             date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
@@ -540,7 +565,10 @@ def query_qa_data():
 
             return jsonify({'status': 'success', 'message': "The following dates had data beyond tolerance levels: " + (", ".join(sorted_out_dates) if sorted_out_dates else "None.")}), 200
 
-        elif ("value for" in query_text_lower or "status for" in query_text_lower) and energy_type and date_param:
+        elif query_type == "value_on_date":
+            if not energy_type or not date_param:
+                return jsonify({'status': 'error', 'message': 'I need both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10) to find a value.'}), 400
+
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
@@ -552,7 +580,7 @@ def query_qa_data():
                 app.logger.error(f"Invalid date format in /query-qa-data: {date_param}", exc_info=True)
                 if sentry_sdk_configured:
                     sentry_sdk.capture_message(f"Invalid date format in /query-qa-data: {date_param}", level="warning")
-                return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
+                return jsonify({'status': 'error', 'message': 'Invalid date format for the date you provided. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
 
 
             found_value = None
@@ -583,7 +611,10 @@ def query_qa_data():
             else:
                 return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
 
-        elif ("show all" in query_text_lower or "all data" in query_text_lower) and energy_type: # Removed 'this month' to make it more flexible
+        elif query_type == "energy_data_for_month":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to list all data for this month.'}), 400
+
             found_row = None
             for row in data_rows_current_month:
                 if row.get("energy") == energy_type:
@@ -608,7 +639,7 @@ def query_qa_data():
             else:
                 return jsonify({'status': 'success', 'message': f"No data found for {energy_type} this month."}), 200
 
-        elif "warning values" in query_text_lower:
+        elif query_type == "warning_values_for_month":
             year, mon = map(int, month_param.split("-"))
             _, num_days = monthrange(year, mon)
             date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
@@ -640,7 +671,9 @@ def query_qa_data():
 
         # --- NEW ANALYTICAL QUERIES ---
 
-        elif "average deviation" in query_text_lower and energy_type:
+        elif query_type == "average_deviation":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to calculate the average deviation.'}), 400
             all_values = []
             for row in data_rows_current_month:
                 if row.get("energy") == energy_type:
@@ -656,7 +689,9 @@ def query_qa_data():
             else:
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to calculate average."}), 200
         
-        elif "max value" in query_text_lower and energy_type:
+        elif query_type == "max_value":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to find the maximum value.'}), 400
             max_val = -float('inf')
             max_date = "N/A"
             year, mon = map(int, month_param.split("-"))
@@ -678,7 +713,9 @@ def query_qa_data():
             else:
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find max value."}), 200
 
-        elif "min value" in query_text_lower and energy_type:
+        elif query_type == "min_value":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to find the minimum value.'}), 400
             min_val = float('inf')
             min_date = "N/A"
             year, mon = map(int, month_param.split("-"))
@@ -700,7 +737,9 @@ def query_qa_data():
             else:
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find min value."}), 200
 
-        elif ("all values for" in query_text_lower or "all energies on" in query_text_lower) and date_param:
+        elif query_type == "all_values_on_date":
+            if not date_param:
+                return jsonify({'status': 'error', 'message': 'I need a specific date (e.g., 2025-07-10) to list all values for it.'}), 400
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
@@ -723,7 +762,12 @@ def query_qa_data():
             else:
                 return jsonify({'status': 'success', 'message': f"No data found for {date_param}."}), 200
 
-
+        elif query_type == "greeting":
+            return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
+        elif query_type == "how_are_you":
+            return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
+        elif query_type == "thank_you":
+            return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
             # Fallback for unrecognized queries
             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
@@ -902,6 +946,71 @@ async def update_user_status():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
+
+# --- ADMIN: DELETE USER ---
+@app.route('/admin/delete-user', methods=['DELETE'])
+async def delete_user():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, admin_uid_from_token = await verify_admin_token(token) # Get admin_uid here
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        content = request.get_json(force=True)
+        uid_to_delete = content.get("uid")
+
+        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token)
+
+        if not uid_to_delete:
+            return jsonify({'message': 'Missing UID for deletion'}), 400
+
+        # Get user data before deletion for logging
+        user_doc_ref = db.collection("users").document(uid_to_delete)
+        user_doc = user_doc_ref.get()
+        user_data_to_log = user_doc.to_dict() if user_doc.exists else {}
+
+        # 1. Delete user from Firebase Authentication
+        try:
+            auth.delete_user(uid_to_delete)
+            app.logger.info(f"Firebase Auth user {uid_to_delete} deleted.")
+        except Exception as e:
+            if "User record not found" in str(e):
+                app.logger.warning(f"Firebase Auth user {uid_to_delete} not found, proceeding with Firestore deletion.")
+                if sentry_sdk_configured:
+                    sentry_sdk.capture_message(f"Firebase Auth user {uid_to_delete} not found during deletion attempt.", level="warning")
+            else:
+                app.logger.error(f"Error deleting Firebase Auth user {uid_to_delete}: {str(e)}", exc_info=True)
+                if sentry_sdk_configured:
+                    sentry_sdk.capture_exception(e)
+                return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
+
+        # 2. Delete user's document from Firestore
+        if user_doc.exists:
+            user_doc_ref.delete()
+            app.logger.info(f"Firestore user document {uid_to_delete} ({user_data_to_log.get('email')}) deleted.")
+        else:
+            app.logger.warning(f"Firestore user document {uid_to_delete} not found (already deleted?).")
+            if sentry_sdk_configured:
+                sentry_sdk.capture_message(f"Firestore user document {uid_to_delete} not found during deletion attempt.", level="warning")
+        
+        # Log the audit event for deletion
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "adminUid": requesting_admin_uid,
+            "action": "user_deletion",
+            "targetUserUid": uid_to_delete,
+            "deletedUserData": user_data_to_log
+        }
+        db.collection("audit_logs").add(audit_entry)
+        app.logger.info(f"Audit: User {uid_to_delete} deleted by {requesting_admin_uid}")
+
+        return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 # --- ADMIN: GET HOSPITAL QA DATA ---
 @app.route('/admin/hospital-data', methods=['GET', 'OPTIONS'])

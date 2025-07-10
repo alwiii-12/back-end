@@ -2,7 +2,7 @@ services:
   - type: web
     name: backend-results
     env: python
-    postBuildCommand: "./post_deploy.sh"
-    buildCommand: ""
+    # REMOVE postBuildCommand: "./post_deploy.sh"
+    buildCommand: "./build.sh" # CHANGE THIS LINE
     startCommand: gunicorn app:app
     envVars: []

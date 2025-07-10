@@ -450,36 +450,76 @@ def query_qa_data():
                 query_type = "out_of_tolerance_dates"
             elif "warning values" in lower_case_query:
                 query_type = "warning_values_for_month"
-            # Add simple fallbacks for other queries if you want them to work without NLP
-            # For now, if NLP is None and no direct keyword match, return an error.
+            elif "average deviation" in lower_case_query and ("6x" in lower_case_query or "10x" in lower_case_query or "15x" in lower_case_query or "6x fff" in lower_case_query or "10x fff" in lower_case_query or "6e" in lower_case_query or "9e" in lower_case_query or "12e" in lower_case_query or "15e" in lower_case_query or "18e" in lower_case_query):
+                query_type = "average_deviation"
+                for e_type in ENERGY_TYPES: # Basic extraction without full NLP
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+            elif "max value" in lower_case_query or "highest value" in lower_case_query:
+                query_type = "max_value"
+                for e_type in ENERGY_TYPES:
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+            elif "min value" in lower_case_query or "lowest value" in lower_case_query:
+                query_type = "min_value"
+                for e_type in ENERGY_TYPES:
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+            elif "all values for" in lower_case_query or "all energies on" in lower_case_query:
+                query_type = "all_values_on_date"
+                date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
+                if date_match_regex: date_param = date_match_regex.group(1)
+            elif "value for" in lower_case_query or "status for" in lower_case_query:
+                query_type = "value_on_date"
+                for e_type in ENERGY_TYPES:
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+                date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
+                if date_match_regex: date_param = date_match_regex.group(1)
+            elif "hi" in lower_case_query or "hello" in lower_case_query or "hey" in lower_case_query:
+                query_type = "greeting"
+            elif "how are you" in lower_case_query:
+                query_type = "how_are_you"
+            elif "thank you" in lower_case_query or "thanks" in lower_case_query:
+                query_type = "thank_you"
             else:
-                return jsonify({'status': 'error', 'message': 'Chatbot is currently in limited mode. Please use exact phrases like "Out of tolerance dates" or "List all warning values".'}), 503
+                return jsonify({'status': 'error', 'message': 'Chatbot is currently in limited mode. Please use exact phrases like "Out of tolerance dates", "Value for 6X on 2025-07-10", "Average deviation for 6X this month", or "List all warning values".'}), 503
+            
+            # If a query type was determined via fallback, but missing parameters, let specific query handle error
+            # If no query type was determined, then it returns the error above
         else:
-            # Parse the user query with SpaCy if NLP is loaded
+            # Full NLP processing
             doc = nlp(user_query_text.lower())
             
-            # Attempt to extract energy type and date from NLP entities/tokens
-            if not energy_type: # Only try to extract if not already provided
-                for token in doc:
-                    # Simple token-based matching for energy types
-                    clean_token = token.text.upper().replace(" ", "")
-                    if clean_token in [e.replace(" ", "") for e in ENERGY_TYPES]:
-                        energy_type = clean_token
-                        break
-                # Fallback to simple regex if SpaCy entities don't catch it
-                if not energy_type:
-                    energy_match_regex = re.search(r'(6x|10x|15x|6x fff|10x fff|6e|9e|12e|15e|18e)', user_query_text.lower())
-                    if energy_match_regex:
-                        energy_type = energy_match_regex.group(0).upper().replace(" ", "")
+            # Attempt to extract energy type from tokens/entities
+            if not energy_type:
+                # Prioritize a custom entity if you had one, otherwise go for known energy type strings
+                found_energy_in_nlp = False
+                for ent in doc.ents: # If you train a custom 'ENERGY' entity
+                    if ent.label_ == "ENERGY":
+                        extracted_energy = ent.text.upper().replace(" ", "")
+                        if extracted_energy in [e.replace(" ", "") for e in ENERGY_TYPES]:
+                            energy_type = extracted_energy
+                            found_energy_in_nlp = True
+                            break
+                if not found_energy_in_nlp: # Fallback to keyword matching if no explicit entity
+                    for e_type in ENERGY_TYPES:
+                        # Use direct string check as spacy doesn't always make named entities for specific codes like '6X'
+                        if e_type.lower().replace(" ", "") in user_query_text.lower().replace(" ", ""):
+                            energy_type = e_type
+                            break
 
-            if not date_param: # Only try to extract if not already provided
+            if not date_param:
                 for ent in doc.ents:
                     if ent.label_ == "DATE":
                         try:
-                            # Attempt to parse extracted date string from various formats
-                            # This needs to be robust for varied user inputs
+                            # Try parsing various common date formats directly from the entity text
                             parsed_date = None
-                            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%d-%m-%Y", "%m/%d/%Y"):
+                            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"): # More formats for robustness
                                 try:
                                     parsed_date = datetime.strptime(ent.text, fmt)
                                     break
@@ -487,20 +527,20 @@ def query_qa_data():
                                     pass
                             if parsed_date:
                                 date_param = parsed_date.strftime("%Y-%m-%d")
-                                break
-                        except Exception: # Catch any parsing errors for the entity
+                                break # Found a date, break entity loop
+                        except Exception:
                             pass
-                # Fallback to regex if NLP entity not found or failed to parse
+                # Fallback to regex if NLP entity or initial parsing failed to be safe
                 if not date_param:
                     date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
                     if date_match_regex:
                         date_param = date_match_regex.group(1)
 
+
             # Determine query type based on keywords and extracted entities
-            # Prioritize specific queries based on keywords
             if "out of tolerance dates" in user_query_text.lower() or "out of spec dates" in user_query_text.lower():
                 query_type = "out_of_tolerance_dates"
-            elif "value for" in user_query_text.lower() or "status for" in user_query_text.lower():
+            elif ("value for" in user_query_text.lower() or "status for" in user_query_text.lower()) and energy_type and date_param:
                 query_type = "value_on_date"
             elif ("show all" in user_query_text.lower() or "all data" in user_query_text.lower()) and energy_type:
                 query_type = "energy_data_for_month"
@@ -522,6 +562,7 @@ def query_qa_data():
                 query_type = "thank_you"
             else:
                 query_type = "unknown"
+
 
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
@@ -550,7 +591,6 @@ def query_qa_data():
             
             out_dates = set()
             for row in data_rows_current_month:
-                energy_type_row = row.get("energy")
                 values = row.get("values", [])
                 for i, value in enumerate(values):
                     try:
@@ -567,12 +607,12 @@ def query_qa_data():
 
         elif query_type == "value_on_date":
             if not energy_type or not date_param:
-                return jsonify({'status': 'error', 'message': 'I need both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10) to find a value.'}), 400
+                return jsonify({'status': 'error', 'message': 'I need both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10) to find a value. Make sure to specify energy and date clearly.'}), 400
 
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year. Please ask for data within the current month, e.g., "value for 6X on 2025-07-10".'}), 400
+                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 400
                 
                 day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
@@ -587,7 +627,7 @@ def query_qa_data():
             found_status = "N/A"
 
             for row in data_rows_current_month:
-                if row.get("energy") == energy_type:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""): # Ensure matching cleaned energy types
                     values = row.get("values", [])
                     if day_index < len(values):
                         found_value = values[day_index]
@@ -617,7 +657,7 @@ def query_qa_data():
 
             found_row = None
             for row in data_rows_current_month:
-                if row.get("energy") == energy_type:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
                     found_row = row
                     break
             
@@ -676,7 +716,7 @@ def query_qa_data():
                 return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to calculate the average deviation.'}), 400
             all_values = []
             for row in data_rows_current_month:
-                if row.get("energy") == energy_type:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
                     for val in row.get("values", []):
                         try:
                             n = float(val)
@@ -698,7 +738,7 @@ def query_qa_data():
             date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
             
             for row in data_rows_current_month:
-                if row.get("energy") == energy_type:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
                     for i, val in enumerate(row.get("values", [])):
                         try:
                             n = float(val)
@@ -722,7 +762,7 @@ def query_qa_data():
             date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
             
             for row in data_rows_current_month:
-                if row.get("energy") == energy_type:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
                     for i, val in enumerate(row.get("values", [])):
                         try:
                             n = float(val)

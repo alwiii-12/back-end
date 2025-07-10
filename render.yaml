@@ -2,7 +2,7 @@ services:
   - type: web
     name: backend-results
     env: python
-    plan: free
+    postBuildCommand: "./post_deploy.sh"
     buildCommand: ""
     startCommand: gunicorn app:app
     envVars: []

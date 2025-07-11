@@ -15,7 +15,7 @@ if SENTRY_DSN:
         ],
         traces_sample_rate=1.0, # Capture 100% of transactions for performance monitoring
         profiles_sample_rate=1.0, # Capture 100% of active samples for profiling
-        send_default_pii=True # Enable sending of PII (Personally identifiable information)
+        send_default_pii=True # Enable sending of PII (Personally Identifiable Information)
     )
     sentry_sdk_configured = True
     print("Sentry initialized successfully.")
@@ -47,35 +47,17 @@ import spacy
 import numpy as np
 from collections import defaultdict
 
-# --- NEW: Imports for os.path operations and sys.path modification ---
-import sys # Import sys
+# --- REMOVED: Imports for os.path operations and sys.path modification ---
+# import sys 
 
 
 # Load SpaCy model once at startup
 try:
-    # Define the absolute path where the model will be copied by post_deploy.sh
-    # This path should be stable and accessible during runtime.
-    RUNTIME_SPACY_MODELS_BASE_DIR = "/opt/render/project/src/spacy_models"
-    
-    # The actual model directory within that base path
-    full_model_directory_path = os.path.join(RUNTIME_SPACY_MODELS_BASE_DIR, 'en_core_web_sm')
-
-    # Add the base directory where SpaCy models are stored to sys.path
-    # This helps spacy.load() find it directly.
-    if RUNTIME_SPACY_MODELS_BASE_DIR not in sys.path:
-        sys.path.insert(0, RUNTIME_SPACY_MODELS_BASE_DIR)
-        print(f"Added {RUNTIME_SPACY_MODELS_BASE_DIR} to sys.path for SpaCy discovery.")
-
-    # Now, attempt to load the model directly from its absolute directory path.
-    # This is the most explicit and robust method when others fail.
-    if os.path.exists(full_model_directory_path) and os.path.isdir(full_model_directory_path):
-        nlp = spacy.load(full_model_directory_path)
-        print(f"SpaCy model 'en_core_web_sm' loaded successfully from explicit directory: {full_model_directory_path}.")
-    else:
-        # If the directory itself isn't found, something went wrong with the download/copy.
-        raise OSError(f"SpaCy model directory not found at expected runtime path: {full_model_directory_path}")
-
-except OSError as e: # Catch the specific OSError if model files are not found or explicit path fails
+    # UPDATED: Simplified SpaCy loading. 
+    # It now relies on 'pip install -e' in post_deploy.sh for model discovery.
+    nlp = spacy.load("en_core_web_sm")
+    print("SpaCy model 'en_core_web_sm' loaded successfully.") 
+except OSError as e: # Catch the specific OSError if model files are not found
     print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
     print("Attempting to load without model, some NLP features might be limited.")
     nlp = None 

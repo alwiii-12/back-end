@@ -3,7 +3,8 @@ services:
     name: backend-results
     env: python
     buildCommand: "./post_deploy.sh"
-    startCommand: gunicorn app:app
+    # UPDATED: Explicitly bind Gunicorn to the Render-provided $PORT
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     envVars:
       # These variables should be set securely in the Render dashboard UI, NOT here.
       # - key: SENTRY_DSN
@@ -15,5 +16,12 @@ services:
       # - key: FIREBASE_CREDENTIALS
       #   value: This should be set in Render dashboard
 
-      - key: SPACY_DATA # <-- This one is a path, not a secret credential.
+      # Render automatically provides the PORT environment variable.
+      # You might explicitly define it here or in the dashboard for clarity, e.g.:
+      - key: PORT
+        value: 10000 # Render's default port.
+      
+      # Keep SPACY_DATA if you previously had it in Render dashboard, 
+      # but app.py will use os.getcwd() for pathing now.
+      - key: SPACY_DATA
         value: /opt/render/project/src/.venv/share/spacy

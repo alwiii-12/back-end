@@ -12,15 +12,17 @@ echo "Python dependencies installed."
 
 # 2. Download the SpaCy English model to a designated data path
 echo "Downloading SpaCy model en_core_web_sm..."
-SPACY_DOWNLOAD_PATH=".venv/share/spacy" # Define a variable for clarity
-python -m spacy download en_core_web_sm --data-path "${SPACY_DOWNLOAD_PATH}"
+# Define a variable for clarity - this is the target directory for the download
+SPACY_DOWNLOAD_TARGET_DIR=".venv/share/spacy"
+python -m spacy download en_core_web_sm --data-path "${SPACY_DOWNLOAD_TARGET_DIR}"
 
 # Check if the download was successful (only check for directory existence now)
-MODEL_DIR="${SPACY_DOWNLOAD_PATH}/en_core_web_sm" # This is the directory containing the downloaded model
-if [ -d "${MODEL_DIR}" ]; then
-    echo "SpaCy model downloaded successfully to ${MODEL_DIR}."
+# The model itself will be in a subdirectory named 'en_core_web_sm' within the target dir
+MODEL_ACTUAL_DIR="${SPACY_DOWNLOAD_TARGET_DIR}/en_core_web_sm"
+if [ -d "${MODEL_ACTUAL_DIR}" ]; then
+    echo "SpaCy model downloaded successfully to ${MODEL_ACTUAL_DIR}."
 else
-    echo "ERROR: SpaCy model download failed or directory not found in ${MODEL_DIR}."
+    echo "ERROR: SpaCy model download failed or directory not found in ${MODEL_ACTUAL_DIR}."
     exit 1 # Exit with error if model is not there
 fi
 

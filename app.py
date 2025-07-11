@@ -47,17 +47,38 @@ import spacy
 import numpy as np
 from collections import defaultdict
 
-# --- REMOVED: Imports for os.path operations and sys.path modification ---
-# import sys 
+# --- NEW: Imports for os.path operations and sys.path modification ---
+import sys # Import sys
 
 
 # Load SpaCy model once at startup
 try:
-    # UPDATED: Simplified SpaCy loading. 
-    # It now relies on 'pip install -e' in post_deploy.sh for model discovery.
-    nlp = spacy.load("en_core_web_sm")
-    print("SpaCy model 'en_core_web_sm' loaded successfully.") 
-except OSError as e: # Catch the specific OSError if model files are not found
+    # Construct the absolute path to the downloaded SpaCy model directory
+    # Render's project root is typically /opt/render/project/src/
+    current_working_dir = os.getcwd() # This should be /opt/render/project/src/ on Render
+    
+    # Path where post_deploy.sh downloads the model data
+    spacy_download_base_path = os.path.join(current_working_dir, '.venv', 'share', 'spacy')
+    
+    # The actual model directory within that path
+    full_model_directory_path = os.path.join(spacy_download_base_path, 'en_core_web_sm')
+
+    # IMPORTANT: Add the directory containing the model (not the model itself) to sys.path
+    # This helps spacy.load() find it even if it's not a formally "installed" package.
+    if spacy_download_base_path not in sys.path:
+        sys.path.insert(0, spacy_download_base_path)
+        print(f"Added {spacy_download_base_path} to sys.path for SpaCy discovery.")
+
+    # Now, attempt to load the model directly from its absolute directory path.
+    # This is the most explicit and robust method when others fail.
+    if os.path.exists(full_model_directory_path) and os.path.isdir(full_model_directory_path):
+        nlp = spacy.load(full_model_directory_path)
+        print(f"SpaCy model 'en_core_web_sm' loaded successfully from explicit directory: {full_model_directory_path}.")
+    else:
+        # If the directory itself isn't found, something went wrong with the download/path.
+        raise OSError(f"SpaCy model directory not found at expected path: {full_model_directory_path}")
+
+except OSError as e: # Catch the specific OSError if model files are not found or explicit path fails
     print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
     print("Attempting to load without model, some NLP features might be limited.")
     nlp = None 
@@ -563,7 +584,7 @@ def query_qa_data():
                 query_type = "greeting"
             elif "how are you" in user_query_text.lower():
                 query_type = "how_are_you"
-            elif "thank you" in user_query_text.lower() or "thanks" in user_query_text.lower():
+            elif "thank you" in lower_case_query or "thanks" in lower_case_query: # Corrected from 'user_case_query'
                 query_type = "thank_you"
             else:
                 query_type = "unknown"
@@ -811,7 +832,7 @@ def query_qa_data():
             return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
         elif query_type == "how_are_you":
             return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
-        elif "thank you" in user_query_text.lower() or "thanks" in user_query_text.lower():
+        elif "thank you" in lower_case_query or "thanks" in lower_case_query: # Corrected from 'user_case_query'
             return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
             query_type = "unknown"
@@ -1080,14 +1101,10 @@ async def get_hospital_qa_data():
 
         results_data = {energy: [''] * num_days for energy in ENERGY_TYPES}
 
-        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
-        doc_snap = doc_ref.get()
-
-        if doc_snap.exists:
-            firestore_data = doc_snap.to_dict().get("data", [])
-            for row in firestore_data:
-                energy = row.get("energy")
-                values = row.get("values", [])
+        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}").get()
+        if doc.exists:
+            for row in doc.to_dict().get("data", []):
+                energy, values = row.get("energy"), row.get("values", [])
                 if energy in results_data:
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
 

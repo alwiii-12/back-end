@@ -33,7 +33,7 @@ import json
 import logging
 from calendar import monthrange
 from datetime import datetime, timedelta
-import re # NEW: For basic regex in NLP fallback
+import re 
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -47,31 +47,16 @@ import spacy
 import numpy as np
 from collections import defaultdict
 
-# --- NEW: Imports for os.path operations ---
-import sys
-import site
+# --- REMOVED: Imports for os.path operations as they are no longer needed for direct path construction ---
+# import sys
+# import site
 
 # Load SpaCy model once at startup
 try:
-    # UPDATED: More robust way to specify the data path for spacy.load() for Render deployment
-    # Construct the expected path to the model within the .venv/share/spacy directory
-    # Based on the download command: python -m spacy download en_core_web_sm --data-path .venv/share/spacy
-    # The actual model will be in .venv/share/spacy/en_core_web_sm/ (followed by version, but spacy.load can find it)
-    
-    current_working_dir = os.getcwd() # This should be the root of your project on Render
-    spacy_data_base_path = os.path.join(current_working_dir, '.venv', 'share', 'spacy')
-    full_model_path = os.path.join(spacy_data_base_path, 'en_core_web_sm')
-
-    if os.path.exists(full_model_path) and os.path.isdir(full_model_path):
-        print(f"Attempting to load SpaCy model from explicit path: {full_model_path}")
-        nlp = spacy.load(full_model_path) # Load directly from the absolute path
-        print("SpaCy model 'en_core_web_sm' loaded successfully from explicit path.")
-    else:
-        print(f"Explicit SpaCy model path not found or not a directory: {full_model_path}. Trying default loading.")
-        # Fallback to default load if explicit path fails, hoping it finds it
-        nlp = spacy.load("en_core_web_sm")
-        print("SpaCy model 'en_core_web_sm' loaded successfully using default path search (possibly system-wide or default cache).")
-    
+    # UPDATED: Simplified SpaCy loading. 
+    # It now relies on the SPACY_DATA environment variable set in render.yaml
+    nlp = spacy.load("en_core_web_sm")
+    print("SpaCy model 'en_core_web_sm' loaded successfully using SPACY_DATA environment variable.")
 except OSError as e: # Catch the specific OSError if model files are not found
     print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
     print("Attempting to load without model, some NLP features might be limited.")

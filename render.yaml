@@ -5,13 +5,15 @@ services:
     buildCommand: "./post_deploy.sh"
     startCommand: gunicorn app:app
     envVars:
-      - key: SENTRY_DSN
-        value: # YOUR SENTRY DSN HERE (leave empty if not using Sentry)
-      - key: SENDER_EMAIL
-        value: # YOUR SENDER EMAIL HERE
-      - key: EMAIL_APP_PASSWORD
-        value: # YOUR EMAIL APP PASSWORD HERE
-      - key: FIREBASE_CREDENTIALS
-        value: # YOUR FIREBASE CREDENTIALS JSON STRING HERE
-      - key: SPACY_DATA # <--- NEW ENVIRONMENT VARIABLE
-        value: /opt/render/project/src/.venv/share/spacy # This is the full path where SpaCy downloads models on Render
+      # These variables should be set securely in the Render dashboard UI, NOT here.
+      # - key: SENTRY_DSN
+      #   value: This should be set in Render dashboard
+      # - key: SENDER_EMAIL
+      #   value: This should be set in Render dashboard
+      # - key: EMAIL_APP_PASSWORD
+      #   value: This should be set in Render dashboard
+      # - key: FIREBASE_CREDENTIALS
+      #   value: This should be set in Render dashboard
+
+      - key: SPACY_DATA # <-- This one is a path, not a secret credential.
+        value: /opt/render/project/src/.venv/share/spacy

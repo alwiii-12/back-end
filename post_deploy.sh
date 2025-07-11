@@ -16,7 +16,7 @@ SPACY_DOWNLOAD_PATH=".venv/share/spacy" # Define a variable for clarity
 python -m spacy download en_core_web_sm --data-path "${SPACY_DOWNLOAD_PATH}"
 
 # Check if the download was successful
-MODEL_DIR="${SPACY_DOWNLOAD_PATH}/en_core_web_sm"
+MODEL_DIR="${SPACY_DOWNLOAD_PATH}/en_core_web_sm" # This is the directory containing the downloaded model
 if [ -d "${MODEL_DIR}" ]; then
     echo "SpaCy model downloaded successfully to ${MODEL_DIR}."
 else
@@ -24,17 +24,19 @@ else
     exit 1 # Exit with error if model is not there
 fi
 
-# 3. Pip install the downloaded SpaCy model
-# This is the most robust way to ensure spacy.load() finds it at runtime.
-echo "Pip installing the downloaded SpaCy model..."
-pip install "${MODEL_DIR}"
+# 3. Create a symbolic link using 'spacy link'
+# This tells SpaCy how to find the model by creating an entry point in site-packages.
+echo "Creating SpaCy model link using 'spacy link'..."
+# The 'spacy link' command expects the path to the model directory and the desired link name.
+# The link name is typically the model's full name (e.g., 'en_core_web_sm').
+# We are linking the downloaded model from MODEL_DIR to 'en_core_web_sm' within the active Python env.
+python -m spacy link "${MODEL_DIR}" "en_core_web_sm" --force
 
-# Check if the pip install was successful (pip install usually returns non-zero on failure, caught by set -e)
-# We can also check if the model is now discoverable by spacy directly
+# Verify the link was created and the model is now discoverable
 if python -c "import spacy; spacy.load('en_core_web_sm')"; then
-    echo "SpaCy model 'en_core_web_sm' successfully installed and discoverable."
+    echo "SpaCy model 'en_core_web_sm' successfully linked and discoverable via spacy.load()."
 else
-    echo "ERROR: SpaCy model 'en_core_web_sm' not discoverable after pip install."
+    echo "ERROR: SpaCy model 'en_core_web_sm' not discoverable after linking."
     exit 1
 fi
 

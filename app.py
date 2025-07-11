@@ -60,7 +60,7 @@ try:
     # Path where post_deploy.sh downloads the model data
     spacy_download_base_path = os.path.join(current_working_dir, '.venv', 'share', 'spacy')
     
-    # The actual model directory within that path (e.g., /opt/render/project/src/.venv/share/spacy/en_core_web_sm)
+    # The actual model directory within that path
     full_model_directory_path = os.path.join(spacy_download_base_path, 'en_core_web_sm')
 
     # IMPORTANT: Add the directory containing the model (not the model itself) to sys.path
@@ -90,10 +90,10 @@ except Exception as e: # Catch any other unexpected errors during load
 app = Flask(__name__)
 
 # Explicitly configure CORS to allow your frontend origin
-# IMPORTANT: Replace '[https://front-endnew.onrender.com](https://front-endnew.onrender.com)' with your actual deployed frontend URL.
+# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual deployed frontend URL.
 # For development, you might use "http://localhost:XXXX" or origins="*".
 # For production, specify your exact frontend domain(s).
-CORS(app, resources={r"/*": {"origins": "[https://front-endnew.onrender.com](https://front-endnew.onrender.com)"}})
+CORS(app, resources={r"/*": {"origins": "https://front-endnew.onrender.com"}})
 
 app.logger.setLevel(logging.DEBUG)
 
@@ -832,7 +832,7 @@ def query_qa_data():
             return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
         elif query_type == "how_are_you":
             return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
-        elif query_type == "thank_you":
+        elif query_type == "thank you":
             return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
             # Fallback for unrecognized queries
@@ -1176,7 +1176,7 @@ async def get_audit_logs():
         app.logger.error(f"Invalid date format for audit logs: {date_filter_str}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_message(f"Invalid date format for audit logs: {date_filter_str}", level="warning")
-        return jsonify({'message': 'Invalid date format for audit logs. Please use YYYY-MM-DD.'}), 400
+        return jsonify({'message': 'Invalid date format. Please use YYYY-MM-DD.'}), 400
     except Exception as e:
         app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
         if sentry_sdk_configured:

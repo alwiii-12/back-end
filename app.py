@@ -53,21 +53,18 @@ import sys # Import sys
 
 # Load SpaCy model once at startup
 try:
-    # Construct the absolute path to the downloaded SpaCy model directory
-    # Render's project root is typically /opt/render/project/src/
-    current_working_dir = os.getcwd() # This should be /opt/render/project/src/ on Render
+    # Define the absolute path where the model will be downloaded by post_deploy.sh
+    # This is /tmp/spacy_models/ which is always writable and accessible at runtime.
+    SPACY_RUNTIME_MODELS_BASE_DIR = "/tmp/spacy_models" # NEW: Use /tmp
     
-    # Path where post_deploy.sh downloads the model data
-    spacy_download_base_path = os.path.join(current_working_dir, '.venv', 'share', 'spacy')
-    
-    # The actual model directory within that path
-    full_model_directory_path = os.path.join(spacy_download_base_path, 'en_core_web_sm')
+    # The actual model directory within that base path
+    full_model_directory_path = os.path.join(SPACY_RUNTIME_MODELS_BASE_DIR, 'en_core_web_sm')
 
-    # IMPORTANT: Add the directory containing the model (not the model itself) to sys.path
-    # This helps spacy.load() find it even if it's not a formally "installed" package.
-    if spacy_download_base_path not in sys.path:
-        sys.path.insert(0, spacy_download_base_path)
-        print(f"Added {spacy_download_base_path} to sys.path for SpaCy discovery.")
+    # IMPORTANT: Add the base directory where SpaCy models are stored to sys.path
+    # This helps spacy.load() find it directly.
+    if SPACY_RUNTIME_MODELS_BASE_DIR not in sys.path:
+        sys.path.insert(0, SPACY_RUNTIME_MODELS_BASE_DIR)
+        print(f"Added {SPACY_RUNTIME_MODELS_BASE_DIR} to sys.path for SpaCy discovery.")
 
     # Now, attempt to load the model directly from its absolute directory path.
     # This is the most explicit and robust method when others fail.
@@ -76,7 +73,7 @@ try:
         print(f"SpaCy model 'en_core_web_sm' loaded successfully from explicit directory: {full_model_directory_path}.")
     else:
         # If the directory itself isn't found, something went wrong with the download/path.
-        raise OSError(f"SpaCy model directory not found at expected path: {full_model_directory_path}")
+        raise OSError(f"SpaCy model directory not found at expected runtime path: {full_model_directory_path}")
 
 except OSError as e: # Catch the specific OSError if model files are not found or explicit path fails
     print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
@@ -1101,15 +1098,23 @@ async def get_hospital_qa_data():
 
         results_data = {energy: [''] * num_days for energy in ENERGY_TYPES}
 
-        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}").get()
-        if doc.exists:
-            for row in doc.to_dict().get("data", []):
-                energy, values = row.get("energy"), row.get("values", [])
-                if energy in results_data:
-                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
+        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
+        doc_snap = doc_ref.get()
 
-        table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
-        return jsonify({'data': table}), 200
+        if doc_snap.exists:
+            firestore_data = doc_snap.to_dict().get("data", [])
+            for row in firestore_data:
+                energy = row.get("energy")
+                values = row.get("values", [])
+                if energy in results_data:
+                    # FIX: Use results_data consistently here
+                    results_data[energy] = (values + [""] * num_days)[:num_days] 
+
+        final_table_data = []
+        for energy_type in ENERGY_TYPES:
+            final_table_data.append([energy_type] + results_data[energy_type]) # FIX: Use results_data consistently here
+
+        return jsonify({'status': 'success', 'data': final_table_data}), 200
     except Exception as e:
         app.logger.error(f"Get data failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:

@@ -49,41 +49,36 @@ from collections import defaultdict
 
 # --- NEW: Imports for os.path operations and sys.path modification ---
 import sys # Import sys
-import site # Import site (useful for finding site-packages if needed, though os.path.join is primary here)
 
 
 # Load SpaCy model once at startup
 try:
     # Construct the absolute path to the downloaded SpaCy model directory
     # Render's project root is typically /opt/render/project/src/
-    current_working_dir = os.getcwd() # This should be /opt/render/project/src/
+    current_working_dir = os.getcwd() # This should be /opt/render/project/src/ on Render
     
-    # Path where post_deploy.sh downloads the model
+    # Path where post_deploy.sh downloads the model data
     spacy_download_base_path = os.path.join(current_working_dir, '.venv', 'share', 'spacy')
     
-    # The actual model directory within that path
+    # The actual model directory within that path (e.g., /opt/render/project/src/.venv/share/spacy/en_core_web_sm)
     full_model_directory_path = os.path.join(spacy_download_base_path, 'en_core_web_sm')
 
-    # Add the base directory where SpaCy models are downloaded to sys.path
-    # This might help spacy.load() find it even by name, or if not, we load by full path.
+    # IMPORTANT: Add the directory containing the model (not the model itself) to sys.path
+    # This helps spacy.load() find it even if it's not a formally "installed" package.
     if spacy_download_base_path not in sys.path:
         sys.path.insert(0, spacy_download_base_path)
-        print(f"Added {spacy_download_base_path} to sys.path.")
+        print(f"Added {spacy_download_base_path} to sys.path for SpaCy discovery.")
 
-    # Attempt to load the model. First try by name, then by direct path if that fails.
-    try:
-        nlp = spacy.load("en_core_web_sm")
-        print("SpaCy model 'en_core_web_sm' loaded successfully (via sys.path or default discovery).")
-    except OSError as e:
-        # If loading by name failed, try loading directly from the absolute path
-        print(f"Loading by name failed: {e}. Attempting to load directly from: {full_model_directory_path}")
-        if os.path.exists(full_model_directory_path) and os.path.isdir(full_model_directory_path):
-            nlp = spacy.load(full_model_directory_path)
-            print(f"SpaCy model 'en_core_web_sm' loaded successfully from explicit directory: {full_model_directory_path}.")
-        else:
-            raise e # Re-raise if explicit path also doesn't work or isn't a directory
+    # Now, attempt to load the model directly from its absolute directory path.
+    # This is the most explicit and robust method when others fail.
+    if os.path.exists(full_model_directory_path) and os.path.isdir(full_model_directory_path):
+        nlp = spacy.load(full_model_directory_path)
+        print(f"SpaCy model 'en_core_web_sm' loaded successfully from explicit directory: {full_model_directory_path}.")
+    else:
+        # If the directory itself isn't found, something went wrong with the download/path.
+        raise OSError(f"SpaCy model directory not found at expected path: {full_model_directory_path}")
 
-except OSError as e: # Catch the specific OSError if model files are not found
+except OSError as e: # Catch the specific OSError if model files are not found or explicit path fails
     print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
     print("Attempting to load without model, some NLP features might be limited.")
     nlp = None 
@@ -95,10 +90,10 @@ except Exception as e: # Catch any other unexpected errors during load
 app = Flask(__name__)
 
 # Explicitly configure CORS to allow your frontend origin
-# IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual deployed frontend URL.
+# IMPORTANT: Replace '[https://front-endnew.onrender.com](https://front-endnew.onrender.com)' with your actual deployed frontend URL.
 # For development, you might use "http://localhost:XXXX" or origins="*".
 # For production, specify your exact frontend domain(s).
-CORS(app, resources={r"/*": {"origins": "https://front-endnew.onrender.com"}})
+CORS(app, resources={r"/*": {"origins": "[https://front-endnew.onrender.com](https://front-endnew.onrender.com)"}})
 
 app.logger.setLevel(logging.DEBUG)
 
@@ -1264,52 +1259,4 @@ def index():
 
 # --- RUN ---
 if __name__ == '__main__':
-    app.run(debug=True) update the app.py and also tell me what is the error in the logs. and also give me the full post_deploy.sh and render.yaml files.Okay, I understand the frustration. The SpaCy model is still not loading, and the logs consistently show the `[E050] Can't find model 'en_core_web_sm'` error. This means that despite our attempts with `data-path`, `SPACY_DATA`, and `spacy link`, the Python runtime environment for your Gunicorn application on Render is still not finding the model.
-
-The error message `It doesn't seem to be a Python package or a valid path to a data directory` is the key. It means SpaCy isn't finding the model in its expected locations, which typically include:
-1.  Installed Python packages (like `pip install en_core_web_sm`).
-2.  Directories specified by `SPACY_DATA` environment variable.
-3.  Symlinks created by `spacy link`.
-
-Since none of these are working, it points to a deeper environmental or pathing issue specific to how Render isolates the runtime.
-
-**The most reliable, albeit slightly more manual, solution is to ensure the model's directory is explicitly added to Python's search path (`sys.path`) at runtime, and then load it directly from that absolute path.**
-
-Let's implement this.
-
----
-
-**1. Updated `post_deploy.sh` (Simplified to just download)**
-
-We will revert `post_deploy.sh` to its simplest form, only ensuring the model is downloaded to a known location. We will *not* try to `pip install` or `spacy link` it here, as that seems to be causing the runtime problem.
-
-```bash
-#!/bin/bash
-
-# Exit immediately if a command exits with a non-zero status.
-set -e
-
-echo "Running custom post_deploy.sh script..."
-
-# 1. Install Python dependencies from requirements.txt
-echo "Installing Python dependencies from requirements.txt..."
-pip install -r requirements.txt
-echo "Python dependencies installed."
-
-# 2. Download the SpaCy English model to a designated data path
-echo "Downloading SpaCy model en_core_web_sm..."
-# Define a variable for clarity - this is the target directory for the download
-SPACY_DOWNLOAD_TARGET_DIR=".venv/share/spacy"
-python -m spacy download en_core_web_sm --data-path "${SPACY_DOWNLOAD_TARGET_DIR}"
-
-# Check if the download was successful by verifying the model's actual directory
-# The model itself will be in a subdirectory named 'en_core_web_sm' within the target dir
-MODEL_ACTUAL_DIR="${SPACY_DOWNLOAD_TARGET_DIR}/en_core_web_sm"
-if [ -d "${MODEL_ACTUAL_DIR}" ]; then
-    echo "SpaCy model downloaded successfully to ${MODEL_ACTUAL_DIR}."
-else
-    echo "ERROR: SpaCy model download failed or directory not found in ${MODEL_ACTUAL_DIR}."
-    exit 1 # Exit with error if model is not there
-fi
-
-echo "post_deploy.sh script finished."
+    app.run(debug=True)

@@ -15,7 +15,7 @@ if SENTRY_DSN:
         ],
         traces_sample_rate=1.0, # Capture 100% of transactions for performance monitoring
         profiles_sample_rate=1.0, # Capture 100% of active samples for profiling
-        send_default_pii=True # Enable sending of PII (Personally Identifiable Information)
+        send_default_pii=True # Enable sending of PII (Personally identifiable information)
     )
     sentry_sdk_configured = True
     print("Sentry initialized successfully.")
@@ -53,21 +53,18 @@ import sys # Import sys
 
 # Load SpaCy model once at startup
 try:
-    # Construct the absolute path to the downloaded SpaCy model directory
-    # Render's project root is typically /opt/render/project/src/
-    current_working_dir = os.getcwd() # This should be /opt/render/project/src/ on Render
+    # Define the absolute path where the model will be copied by post_deploy.sh
+    # This path should be stable and accessible during runtime.
+    RUNTIME_SPACY_MODELS_BASE_DIR = "/opt/render/project/src/spacy_models"
     
-    # Path where post_deploy.sh downloads the model data
-    spacy_download_base_path = os.path.join(current_working_dir, '.venv', 'share', 'spacy')
-    
-    # The actual model directory within that path
-    full_model_directory_path = os.path.join(spacy_download_base_path, 'en_core_web_sm')
+    # The actual model directory within that base path
+    full_model_directory_path = os.path.join(RUNTIME_SPACY_MODELS_BASE_DIR, 'en_core_web_sm')
 
-    # IMPORTANT: Add the directory containing the model (not the model itself) to sys.path
-    # This helps spacy.load() find it even if it's not a formally "installed" package.
-    if spacy_download_base_path not in sys.path:
-        sys.path.insert(0, spacy_download_base_path)
-        print(f"Added {spacy_download_base_path} to sys.path for SpaCy discovery.")
+    # Add the base directory where SpaCy models are stored to sys.path
+    # This helps spacy.load() find it directly.
+    if RUNTIME_SPACY_MODELS_BASE_DIR not in sys.path:
+        sys.path.insert(0, RUNTIME_SPACY_MODELS_BASE_DIR)
+        print(f"Added {RUNTIME_SPACY_MODELS_BASE_DIR} to sys.path for SpaCy discovery.")
 
     # Now, attempt to load the model directly from its absolute directory path.
     # This is the most explicit and robust method when others fail.
@@ -75,8 +72,8 @@ try:
         nlp = spacy.load(full_model_directory_path)
         print(f"SpaCy model 'en_core_web_sm' loaded successfully from explicit directory: {full_model_directory_path}.")
     else:
-        # If the directory itself isn't found, something went wrong with the download/path.
-        raise OSError(f"SpaCy model directory not found at expected path: {full_model_directory_path}")
+        # If the directory itself isn't found, something went wrong with the download/copy.
+        raise OSError(f"SpaCy model directory not found at expected runtime path: {full_model_directory_path}")
 
 except OSError as e: # Catch the specific OSError if model files are not found or explicit path fails
     print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
@@ -832,7 +829,7 @@ def query_qa_data():
             return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
         elif query_type == "how_are_you":
             return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
-        elif query_type == "thank you" in lower_case_query: # Corrected typo: user_case_query -> lower_case_query
+        elif "thank you" in user_query_text.lower() or "thanks" in user_query_text.lower():
             return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
             query_type = "unknown"

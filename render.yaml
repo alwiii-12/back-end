@@ -2,7 +2,16 @@ services:
   - type: web
     name: backend-results
     env: python
-    # Change buildCommand to use custom build.sh script
-    buildCommand: "./post_deploy.sh" # CHANGED: Now using post_deploy.sh for build and spacy model download
+    buildCommand: "./post_deploy.sh"
     startCommand: gunicorn app:app
-    envVars: []
+    envVars:
+      - key: SENTRY_DSN
+        value: # YOUR SENTRY DSN HERE (leave empty if not using Sentry)
+      - key: SENDER_EMAIL
+        value: # YOUR SENDER EMAIL HERE
+      - key: EMAIL_APP_PASSWORD
+        value: # YOUR EMAIL APP PASSWORD HERE
+      - key: FIREBASE_CREDENTIALS
+        value: # YOUR FIREBASE CREDENTIALS JSON STRING HERE
+      - key: SPACY_DATA # <--- NEW ENVIRONMENT VARIABLE
+        value: /opt/render/project/src/.venv/share/spacy # This is the full path where SpaCy downloads models on Render

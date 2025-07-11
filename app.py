@@ -54,7 +54,7 @@ from collections import defaultdict
 # Load SpaCy model once at startup
 try:
     # UPDATED: Simplified SpaCy loading. 
-    # It now relies on the SPACY_DATA environment variable set in render.yaml
+    # It now relies on the SPACY_DATA environment variable set externally (e.g., in render.yaml or Render dashboard)
     nlp = spacy.load("en_core_web_sm")
     print("SpaCy model 'en_core_web_sm' loaded successfully using SPACY_DATA environment variable.")
 except OSError as e: # Catch the specific OSError if model files are not found
@@ -62,7 +62,7 @@ except OSError as e: # Catch the specific OSError if model files are not found
     print("Attempting to load without model, some NLP features might be limited.")
     nlp = None 
 except Exception as e: # Catch any other unexpected errors during load
-    print(f"An unexpected error occurred during SpaCy model loading: {e}", exc_info=True) # Added exc_info
+    print(f"An unexpected error occurred during SpaCy model loading: {e}", exc_info=True)
     nlp = None
 
 
@@ -1089,7 +1089,7 @@ async def get_hospital_qa_data():
                 energy = row.get("energy")
                 values = row.get("values", [])
                 if energy in results_data:
-                    results_data[energy] = (values + [''] * num_days)[:num_days]
+                    results_data[energy] = (values + [""] * num_days)[:num_days]
         
         final_table_data = []
         for energy_type in ENERGY_TYPES:

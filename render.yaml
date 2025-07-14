@@ -3,6 +3,7 @@ services:
     name: backend-results
     env: python
     buildCommand: "./post_deploy.sh"
+    # Explicitly bind Gunicorn to the Render-provided $PORT
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     envVars:
       # These variables should be set securely in the Render dashboard UI, NOT here.
@@ -20,12 +21,4 @@ services:
       - key: PORT
         value: 10000 # Render's default port.
       
-      # SPACY_DATA is no longer explicitly needed by app.py, but remains if Render uses it internally.
-      # However, since we're using /tmp, you can remove it if it was only for the old strategy.
-      # If you keep it, ensure it's not pointing to /tmp (it should point to .venv if anything).
-      # For now, let's omit it if you already have it in Render dashboard or you can remove it.
-      # If you don't have it in the dashboard and it's not needed, remove it.
-      # For simplicity, if you were managing SPACY_DATA in render.yaml, remove it now.
-      # It's not part of this /tmp strategy.
-      # - key: SPACY_DATA
-      #   value: /opt/render/project/src/.venv/share/spacy
+      # REMOVED: SPACY_DATA environment variable.

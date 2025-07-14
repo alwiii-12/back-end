@@ -434,12 +434,13 @@ def query_qa_data():
         date_param = None  
 
         lower_case_query = user_query_text.lower()
-        cleaned_query_no_space = lower_case_query.replace(" ", "")
+        # Removed cleaned_query_no_space as it's not strictly needed for this pattern of matching
+        # cleaned_query_no_space = lower_case_query.replace(" ", "")
 
         # Attempt to extract energy type using keywords (more robust)
         for e_type in ENERGY_TYPES:
             # Check for exact matches of energy types (e.g., "6x", "10x", "6x fff")
-            if e_type.lower().replace(" ", "") in cleaned_query_no_space:
+            if e_type.lower() in lower_case_query: # Use lower_case_query directly
                 energy_type = e_type
                 break
         
@@ -450,26 +451,38 @@ def query_qa_data():
 
         query_type = "unknown" # Default classification
 
-        # Determine query type based on keywords
-        if "out of tolerance dates" in lower_case_query or "out of spec dates" in lower_case_query:
-            query_type = "out_of_tolerance_dates"
-        elif "warning values" in lower_case_query or "warnings for" in lower_case_query:
-            query_type = "warning_values_for_month"
-        elif "average deviation" in lower_case_query:
+        # Prioritize specific queries first, then general ones.
+        # Order matters here: More specific patterns should come before broader ones.
+
+        # Specific analytical queries that need energy_type
+        if "average deviation" in lower_case_query:
             query_type = "average_deviation"
         elif "max value" in lower_case_query or "highest value" in lower_case_query:
             query_type = "max_value"
         elif "min value" in lower_case_query or "lowest value" in lower_case_query:
             query_type = "min_value"
-        elif "all values for" in lower_case_query or "all energies on" in lower_case_query:
-            query_type = "all_values_on_date"
+
+        # Queries that might need both energy_type and date_param
         elif "value for" in lower_case_query or "status for" in lower_case_query:
             query_type = "value_on_date"
+        elif "all values for" in lower_case_query or "all energies on" in lower_case_query:
+            query_type = "all_values_on_date"
+        elif "all" in lower_case_query and "data" in lower_case_query and "this month" in lower_case_query:
+            # Catches "all 6x data this month", "all 10x fff data this month"
+            query_type = "energy_data_for_month"
+            
+        # Other specific queries
+        elif "out of tolerance dates" in lower_case_query or "out of spec dates" in lower_case_query:
+            query_type = "out_of_tolerance_dates"
+        elif "warning values" in lower_case_query or "warnings for" in lower_case_query:
+            query_type = "warning_values_for_month"
+
+        # General greetings (lowest priority)
         elif "hi" in lower_case_query or "hello" in lower_case_query or "hey" in lower_case_query:
             query_type = "greeting"
         elif "how are you" in lower_case_query:
             query_type = "how_are_you"
-        elif "thank you" in lower_case_query or "thanks" in lower_case_query:
+        elif "thank you" in lower_case_query or "thanks" in lower_case_query: 
             query_type = "thank_you"
         
         # --- NEW LOGIC FOR HANDLING PARTIAL QUERIES / CLARIFICATIONS ---
@@ -483,7 +496,7 @@ def query_qa_data():
             elif not date_param:
                 return jsonify({'status': 'error', 'message': f'To get a value for {energy_type}, please specify the date in YYYY-MM-DD format (e.g., 2025-07-10).'}), 200
         elif query_type == "energy_data_for_month" and not energy_type:
-             return jsonify({'status': 'error', 'message': 'To show all data for a specific energy, please specify the energy type (e.g., "all 6X data this month").'}), 200
+             return jsonify({'status': 'error', 'message': 'To show all data for a specific energy this month, please specify the energy type (e.g., "all 6X data this month").'}), 200
         elif (query_type == "average_deviation" or query_type == "max_value" or query_type == "min_value") and not energy_type:
              return jsonify({'status': 'error', 'message': f'To calculate {query_type.replace("_", " ")} for an energy type, please specify the energy type (e.g., "{query_type.replace("_", " ")} for 6X").'}), 200
         elif query_type == "all_values_on_date" and not date_param:
@@ -690,7 +703,7 @@ def query_qa_data():
             
             for row in data_rows_current_month:
                 if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for i, val in enumerate(row.get("values", [])): # Iterate over row.get("values", [])
+                    for i, val in enumerate(row.get("values", [])): # Changed from `enumerate(values)`
                         try:
                             n = float(val)
                             if n < min_val:
@@ -735,7 +748,8 @@ def query_qa_data():
         elif "thank you" in lower_case_query or "thanks" in lower_case_query: 
             return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
-            query_type = "unknown" # Fallback if none of the above matched after all checks
+            # This 'else' should ideally not be reached if previous 'unknown' check covers everything.
+            # But kept as final safety net.
             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
 
     except Exception as e:

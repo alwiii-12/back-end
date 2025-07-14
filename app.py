@@ -42,49 +42,17 @@ from firebase_admin import credentials, firestore, auth
 import pandas as pd
 from io import BytesIO
 
-# NEW IMPORTS FOR CHATBOT NLP & MATH
-import spacy
-import numpy as np
-from collections import defaultdict
+# REMOVED: NEW IMPORTS FOR CHATBOT NLP & MATH (spacy, numpy, collections.defaultdict)
+# import spacy
+# import numpy as np
+# from collections import defaultdict
 
-# --- NEW: Imports for os.path operations and sys.path modification ---
-import sys # Import sys
+# REMOVED: NEW: Imports for os.path operations and sys.path modification (sys)
+# import sys 
 
 
-# Load SpaCy model once at startup
-try:
-    # Construct the absolute path to the downloaded SpaCy model directory
-    # Render's project root is typically /opt/render/project/src/
-    current_working_dir = os.getcwd() # This should be /opt/render/project/src/ on Render
-    
-    # Path where post_deploy.sh downloads the model data
-    spacy_download_base_path = os.path.join(current_working_dir, '.venv', 'share', 'spacy')
-    
-    # The actual model directory within that path
-    full_model_directory_path = os.path.join(spacy_download_base_path, 'en_core_web_sm')
-
-    # IMPORTANT: Add the directory containing the model (not the model itself) to sys.path
-    # This helps spacy.load() find it even if it's not a formally "installed" package.
-    if spacy_download_base_path not in sys.path:
-        sys.path.insert(0, spacy_download_base_path)
-        print(f"Added {spacy_download_base_path} to sys.path for SpaCy discovery.")
-
-    # Now, attempt to load the model directly from its absolute directory path.
-    # This is the most explicit and robust method when others fail.
-    if os.path.exists(full_model_directory_path) and os.path.isdir(full_model_directory_path):
-        nlp = spacy.load(full_model_directory_path)
-        print(f"SpaCy model 'en_core_web_sm' loaded successfully from explicit directory: {full_model_directory_path}.")
-    else:
-        # If the directory itself isn't found, something went wrong with the download/path.
-        raise OSError(f"SpaCy model directory not found at expected path: {full_model_directory_path}")
-
-except OSError as e: # Catch the specific OSError if model files are not found or explicit path fails
-    print(f"SpaCy model 'en_core_web_sm' not found or could not be loaded: {e}")
-    print("Attempting to load without model, some NLP features might be limited.")
-    nlp = None 
-except Exception as e: # Catch any other unexpected errors during load
-    print(f"An unexpected error occurred during SpaCy model loading: {e}", exc_info=True)
-    nlp = None
+# Set nlp to None explicitly, as it's no longer loaded
+nlp = None # This makes sure the 'nlp is None' check always passes
 
 
 app = Flask(__name__)
@@ -461,28 +429,28 @@ def query_qa_data():
         month_param = content.get("month")
         uid = content.get("uid")
         
-        # Parameters that can be extracted by NLP or provided as fallback
-        energy_type = None # Ensure it starts as None for proper conditional logic
-        date_param = None  # Ensure it starts as None for proper conditional logic
+        # Parameters that can be extracted by parsing the raw text
+        energy_type = None 
+        date_param = None  
 
-        # Clean query text for matching
         lower_case_query = user_query_text.lower()
         cleaned_query_no_space = lower_case_query.replace(" ", "")
 
-        # Attempt to extract energy type
+        # Attempt to extract energy type using keywords (more robust)
         for e_type in ENERGY_TYPES:
+            # Check for exact matches of energy types (e.g., "6x", "10x", "6x fff")
             if e_type.lower().replace(" ", "") in cleaned_query_no_space:
                 energy_type = e_type
                 break
         
-        # Attempt to extract date
+        # Attempt to extract date using regex (already existing, very robust)
         date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
         if date_match_regex:
             date_param = date_match_regex.group(1)
 
-        query_type = "unknown" # Default to unknown
+        query_type = "unknown" # Default classification
 
-        # Determine query type based on keywords and extracted parameters
+        # Determine query type based on keywords
         if "out of tolerance dates" in lower_case_query or "out of spec dates" in lower_case_query:
             query_type = "out_of_tolerance_dates"
         elif "warning values" in lower_case_query or "warnings for" in lower_case_query:
@@ -504,12 +472,14 @@ def query_qa_data():
         elif "thank you" in lower_case_query or "thanks" in lower_case_query:
             query_type = "thank_you"
         
-        # --- NEW LOGIC FOR PARTIAL QUERIES ---
+        # --- NEW LOGIC FOR HANDLING PARTIAL QUERIES / CLARIFICATIONS ---
+        # This section provides more specific prompts based on missing info.
+        
         if query_type == "value_on_date":
             if not energy_type and not date_param:
                 return jsonify({'status': 'error', 'message': 'To get a specific value, please provide both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10).'}), 200
             elif not energy_type:
-                return jsonify({'status': 'error', 'message': f'To get a value for {date_param}, please specify the energy type (e.g., 6X, 10X).'}), 200
+                return jsonify({'status': 'error', 'message': f'To get a value for {date_param}, please specify the energy type (e.g., 6X, 10X, 6E).'}), 200
             elif not date_param:
                 return jsonify({'status': 'error', 'message': f'To get a value for {energy_type}, please specify the date in YYYY-MM-DD format (e.g., 2025-07-10).'}), 200
         elif query_type == "energy_data_for_month" and not energy_type:
@@ -518,11 +488,14 @@ def query_qa_data():
              return jsonify({'status': 'error', 'message': f'To calculate {query_type.replace("_", " ")} for an energy type, please specify the energy type (e.g., "{query_type.replace("_", " ")} for 6X").'}), 200
         elif query_type == "all_values_on_date" and not date_param:
              return jsonify({'status': 'error', 'message': 'To list all values for a specific date, please specify the date in YYYY-MM-DD format (e.g., "all values for 2025-07-05").'}), 200
-        elif nlp is None and query_type == "unknown": # Only show limited mode if NLP is truly missing and query is unknown
-             return jsonify({'status': 'error', 'message': 'Chatbot is currently in limited mode. Please use exact phrases like "Out of tolerance dates", "Value for 6X on 2025-07-10", "Average deviation for 6X this month", or "List all warning values".'}), 503
-        elif nlp is not None and query_type == "unknown": # Better fallback if NLP is loaded but still couldn't understand
-             return jsonify({'status': 'error', 'message': 'I\'m sorry, I couldn\'t understand that. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
+        elif query_type == "unknown": # Final fallback if none of the specific types or partials matched
+             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
 
+        # ... (rest of query_qa_data logic remains mostly the same, now guaranteed to have necessary params for its specific query_type) ...
+        # The subsequent 'if/elif' blocks for query_type (e.g., out_of_tolerance_dates, value_on_date)
+        # will now only execute if the required parameters (energy_type, date_param) are correctly extracted
+        # or were not needed for that specific query_type (like 'greeting').
+        # The 'else' at the very end of the function is now replaced by the 'unknown' check above.
 
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:

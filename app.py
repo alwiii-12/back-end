@@ -666,6 +666,8 @@ def query_qa_data():
                         except (ValueError, TypeError):
                             pass
             if all_values:
+                # Assuming numpy is available in the environment from requirements.txt
+                import numpy as np # Import numpy here if it's only needed in this function and not globally
                 avg = np.mean(all_values)
                 return jsonify({'status': 'success', 'average_deviation': round(avg, 2), 'message': f"The average deviation for {energy_type} this month is {avg:.2f}%."}), 200
             else:
@@ -716,8 +718,7 @@ def query_qa_data():
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find min value."}), 200
 
         elif query_type == "all_values_on_date":
-            if not date_param:
-                return jsonify({'status': 'error', 'message': 'I need a specific date (e.g., 2025-07-10) to list all values for it.'}), 400
+            # date_param is guaranteed to be present by NEW LOGIC above
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
@@ -733,10 +734,10 @@ def query_qa_data():
                 if day_index < len(values):
                     val = values[day_index]
                     if val != '':
-                        daily_data.append(f"{energy_type_row}: {val}%")
+                        daily_data.append({"energy": energy_type_row, "value": val}) # Changed to structured data
             
             if daily_data:
-                return jsonify({'status': 'success', 'message': f"Data for {date_param}: {'; '.join(daily_data)}."}), 200
+                return jsonify({'status': 'success', 'daily_data': daily_data, 'message': f"Data for {date_param}:"}), 200
             else:
                 return jsonify({'status': 'success', 'message': f"No data found for {date_param}."}), 200
 
@@ -744,10 +745,11 @@ def query_qa_data():
             return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
         elif query_type == "how_are_you":
             return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
-        elif query_type == "thank_you":
+        elif "thank you" in lower_case_query or "thanks" in lower_case_query: 
             return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
-            # Fallback for unrecognized queries
+            # This 'else' should ideally not be reached if previous 'unknown' check covers everything.
+            # But kept as final safety net.
             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
 
     except Exception as e:
@@ -923,7 +925,7 @@ async def update_user_status():
         app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-        return jsonify({'message': str(e)}), 500
+        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 # --- ADMIN: DELETE USER ---
 @app.route('/admin/delete-user', methods=['DELETE'])
@@ -1085,7 +1087,6 @@ async def get_audit_logs():
                     utc_dt = None # Or handle more robustly if other types are expected
                 
                 if utc_dt:
-                    ist_dt = utc_dt.astimezone(ist_timezone) # Convert UTC to IST
                     # Format to DD/MM/YYYY, HH:MM:SS AM/PM - This is the format seen in your screenshot
                     log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
                 else:
@@ -1137,7 +1138,8 @@ async def export_excel():
         doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
         if doc.exists:
             for row in doc.to_dict().get("data", []):
-                energy, values = row.get("energy"), row.get("values", [])
+                energy = row.get("energy")
+                values = row.get("values", [])
                 if energy in energy_dict:
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
         

@@ -34,6 +34,7 @@ import logging
 from calendar import monthrange
 from datetime import datetime, timedelta
 import re 
+import pytz # NEW: Import pytz for timezone handling
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -322,10 +323,7 @@ async def send_alert():
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
-            app.logger.warning(f"User document not found for UID: {uid} during alert processing.")
-            if sentry_sdk_configured:
-                sentry_sdk.capture_message(f"User document not found for UID: {uid} during alert processing.", level="warning")
-            return jsonify({'status': 'error', 'message': 'User not found for alert processing'}), 404
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
         user_data = user_doc.to_dict()
         center_id = user_data.get('centerId')
 
@@ -1024,11 +1022,11 @@ async def get_hospital_qa_data():
                 energy = row.get("energy")
                 values = row.get("values", [])
                 if energy in results_data:
-                    results_data[energy] = (values + [""] * num_days)[:num_days] # FIX: Use results_data consistently here
+                    results_data[energy] = (values + [""] * num_days)[:num_days]
 
         final_table_data = []
         for energy_type in ENERGY_TYPES:
-            final_table_data.append([energy_type] + results_data[energy_type]) # FIX: Use results_data consistently here
+            final_table_data.append([energy_type] + results_data[energy_type])
 
         return jsonify({'status': 'success', 'data': final_table_data}), 200
     except Exception as e:
@@ -1071,17 +1069,29 @@ async def get_audit_logs():
 
         logs_stream = logs_query.stream()
         all_logs = []
-        # Define IST timezone offset
-        IST_OFFSET = timedelta(hours=5, minutes=30) # Indian Standard Time is UTC+5:30
+        # Define IST timezone object
+        ist_timezone = pytz.timezone('Asia/Kolkata') # Indian Standard Time is UTC+5:30
 
         for doc in logs_stream:
             log_data = doc.to_dict()
             # Convert Firestore Timestamp to string for JSON serialization
-            if 'timestamp' in log_data and hasattr(log_data['timestamp'], 'strftime'):
-                # Convert UTC timestamp to IST
-                utc_dt = log_data['timestamp'].replace(tzinfo=None) # Remove timezone info from naive datetime
-                ist_dt = utc_dt + IST_OFFSET # Apply offset
-                log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") # Format for display 
+            if 'timestamp' in log_data and log_data['timestamp'] is not None:
+                # Ensure it's a timezone-aware datetime object before conversion
+                if hasattr(log_data['timestamp'], 'astimezone'): # It's likely a Firestore Timestamp object already
+                    utc_dt = log_data['timestamp'].astimezone(pytz.utc) 
+                elif isinstance(log_data['timestamp'], datetime): # It's a naive datetime, assume UTC for server timestamp
+                    utc_dt = log_data['timestamp'].replace(tzinfo=pytz.utc)
+                else: # Fallback for unexpected timestamp types
+                    utc_dt = None # Or handle more robustly if other types are expected
+                
+                if utc_dt:
+                    ist_dt = utc_dt.astimezone(ist_timezone) # Convert UTC to IST
+                    # Format for display in a common, easily parseable string format
+                    log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") # e.g., "15/07/2025, 05:05:31 AM"
+                else:
+                    log_data['timestamp'] = 'Invalid Date/Time' # Indicate issue if conversion fails
+            else:
+                log_data['timestamp'] = 'No Timestamp' # If timestamp field is missing or None
             all_logs.append(log_data)
 
         return jsonify({'status': 'success', 'logs': all_logs}), 200

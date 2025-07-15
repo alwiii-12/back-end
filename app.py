@@ -323,7 +323,10 @@ async def send_alert():
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+            app.logger.warning(f"User document not found for UID: {uid} during alert processing.")
+            if sentry_sdk_configured:
+                sentry_sdk.capture_message(f"User document not found for UID: {uid} during alert processing.", level="warning")
+            return jsonify({'status': 'error', 'message': 'User not found for alert processing'}), 404
         user_data = user_doc.to_dict()
         center_id = user_data.get('centerId')
 
@@ -550,11 +553,13 @@ def query_qa_data():
             return jsonify({'status': 'success', 'message': "The following dates had data beyond tolerance levels: " + (", ".join(sorted_out_dates) if sorted_out_dates else "None.")}), 200
 
         elif query_type == "value_on_date":
-            # Parameters are guaranteed to be present by the NEW LOGIC above
+            if not energy_type or not date_param:
+                return jsonify({'status': 'error', 'message': 'I need both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10) to find a value. Make sure to specify energy and date clearly.'}), 400
+
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
+                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 400
                 
                 day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
@@ -598,7 +603,9 @@ def query_qa_data():
                 return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
 
         elif query_type == "energy_data_for_month":
-            # energy_type is guaranteed to be present by NEW LOGIC above
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to list all data for this month.'}), 400
+
             found_row = None
             for row in data_rows_current_month:
                 if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
@@ -614,10 +621,10 @@ def query_qa_data():
                 values = found_row.get("values", [])
                 for i, val in enumerate(values):
                     if i < len(dates) and (val is not None and val != ''): # Only include actual data points
-                        formatted_data.append({"date": dates[i], "value": val}) # Changed to structured data
-                
+                        formatted_data.append(f"{dates[i]}: {val}%")
+
                 if formatted_data:
-                    return jsonify({'status': 'success', 'data': formatted_data, 'message': f"Here is the data for {energy_type} this month."}), 200
+                    return jsonify({'status': 'success', 'message': f"Here is the data for {energy_type} this month: {'; '.join(formatted_data)}."}), 200
                 else:
                     return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month."}), 200
             else:
@@ -648,14 +655,16 @@ def query_qa_data():
             sorted_warning_entries = sorted(warning_entries, key=lambda x: (x['date'], x['energy']))
 
             if sorted_warning_entries:
-                # formatted_warnings = [f"{entry['energy']} on {entry['date']}: {entry['value']}%" for entry in sorted_warning_entries]
-                return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries, 'message': "Warning values this month."}), 200
+                formatted_warnings = [f"{entry['energy']} on {entry['date']}: {entry['value']}%" for entry in sorted_warning_entries]
+                return jsonify({'status': 'success', 'message': "Warning values this month: " + "; ".join(formatted_warnings) + "."}), 200
             else:
                 return jsonify({'status': 'success', 'message': "No warning values found this month. Great job!"}), 200
 
-        # --- ANALYTICAL QUERIES (Parameters guaranteed by NEW LOGIC above) ---
+        # --- NEW ANALYTICAL QUERIES ---
 
         elif query_type == "average_deviation":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to calculate the average deviation.'}), 400
             all_values = []
             for row in data_rows_current_month:
                 if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
@@ -666,14 +675,14 @@ def query_qa_data():
                         except (ValueError, TypeError):
                             pass
             if all_values:
-                # Assuming numpy is available in the environment from requirements.txt
-                import numpy as np # Import numpy here if it's only needed in this function and not globally
                 avg = np.mean(all_values)
-                return jsonify({'status': 'success', 'average_deviation': round(avg, 2), 'message': f"The average deviation for {energy_type} this month is {avg:.2f}%."}), 200
+                return jsonify({'status': 'success', 'message': f"The average deviation for {energy_type} this month is {avg:.2f}%."}), 200
             else:
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to calculate average."}), 200
         
         elif query_type == "max_value":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to find the maximum value.'}), 400
             max_val = -float('inf')
             max_date = "N/A"
             year, mon = map(int, month_param.split("-"))
@@ -691,11 +700,13 @@ def query_qa_data():
                         except (ValueError, TypeError):
                             pass
             if max_val != -float('inf'):
-                return jsonify({'status': 'success', 'max_value': round(max_val, 2), 'max_date': max_date, 'message': f"The maximum value for {energy_type} this month was {max_val:.2f}% on {max_date}."}), 200
+                return jsonify({'status': 'success', 'message': f"The maximum value for {energy_type} this month was {max_val:.2f}% on {max_date}."}), 200
             else:
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find max value."}), 200
 
         elif query_type == "min_value":
+            if not energy_type:
+                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to find the minimum value.'}), 400
             min_val = float('inf')
             min_date = "N/A"
             year, mon = map(int, month_param.split("-"))
@@ -703,7 +714,7 @@ def query_qa_data():
             
             for row in data_rows_current_month:
                 if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for i, val in enumerate(row.get("values", [])): # Iterate over row.get("values", [])
+                    for i, val in enumerate(row.get("values", [])):
                         try:
                             n = float(val)
                             if n < min_val:
@@ -713,16 +724,17 @@ def query_qa_data():
                         except (ValueError, TypeError):
                             pass
             if min_val != float('inf'):
-                return jsonify({'status': 'success', 'min_value': round(min_val, 2), 'min_date': min_date, 'message': f"The minimum value for {energy_type} this month was {min_val:.2f}% on {min_date}."}), 200
+                return jsonify({'status': 'success', 'message': f"The minimum value for {energy_type} this month was {min_val:.2f}% on {min_date}."}), 200
             else:
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find min value."}), 200
 
         elif query_type == "all_values_on_date":
-            # date_param is guaranteed to be present by NEW LOGIC above
+            if not date_param:
+                return jsonify({'status': 'error', 'message': 'I need a specific date (e.g., 2025-07-10) to list all values for it.'}), 400
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year. Please ensure the date is within the current selected month.'}), 200
+                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year. Please ensure the date is within the current selected month.'}), 400
                 day_index = parsed_date_obj.day - 1 
             except ValueError:
                 return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
@@ -734,10 +746,10 @@ def query_qa_data():
                 if day_index < len(values):
                     val = values[day_index]
                     if val != '':
-                        daily_data.append({"energy": energy_type_row, "value": val}) # Changed to structured data
+                        daily_data.append(f"{energy_type_row}: {val}%")
             
             if daily_data:
-                return jsonify({'status': 'success', 'daily_data': daily_data, 'message': f"Data for {date_param}:"}), 200
+                return jsonify({'status': 'success', 'message': f"Data for {date_param}: {'; '.join(daily_data)}."}), 200
             else:
                 return jsonify({'status': 'success', 'message': f"No data found for {date_param}."}), 200
 
@@ -745,11 +757,10 @@ def query_qa_data():
             return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
         elif query_type == "how_are_you":
             return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
-        elif "thank you" in lower_case_query or "thanks" in lower_case_query: 
+        elif query_type == "thank_you":
             return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
-            # This 'else' should ideally not be reached if previous 'unknown' check covers everything.
-            # But kept as final safety net.
+            # Fallback for unrecognized queries
             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
 
     except Exception as e:
@@ -925,7 +936,7 @@ async def update_user_status():
         app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
+        return jsonify({'message': str(e)}), 500
 
 # --- ADMIN: DELETE USER ---
 @app.route('/admin/delete-user', methods=['DELETE'])
@@ -1138,8 +1149,7 @@ async def export_excel():
         doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
         if doc.exists:
             for row in doc.to_dict().get("data", []):
-                energy = row.get("energy")
-                values = row.get("values", [])
+                energy, values = row.get("energy"), row.get("values", [])
                 if energy in energy_dict:
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
         

@@ -34,7 +34,7 @@ import logging
 from calendar import monthrange
 from datetime import datetime, timedelta
 import re 
-import pytz # Import pytz for timezone handling
+import pytz # NEW: Import pytz for timezone handling
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -43,17 +43,17 @@ from firebase_admin import credentials, firestore, auth
 import pandas as pd
 from io import BytesIO
 
-# Removed SpaCy and NumPy imports
+# REMOVED: NEW IMPORTS FOR CHATBOT NLP & MATH (spacy, numpy, collections.defaultdict)
 # import spacy
 # import numpy as np
 # from collections import defaultdict
 
-# Removed sys import (no longer directly manipulating sys.path for SpaCy)
+# REMOVED: NEW: Imports for os.path operations and sys.path modification (sys)
 # import sys 
 
 
 # Set nlp to None explicitly, as it's no longer loaded
-nlp = None
+nlp = None # This makes sure the 'nlp is None' check always passes
 
 
 app = Flask(__name__)
@@ -701,7 +701,7 @@ def query_qa_data():
             
             for row in data_rows_current_month:
                 if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for i, val in enumerate(row.get("values", [])): # Iterate over row.get("values", [])
+                    for i, val in enumerate(row.get("values", [])):
                         try:
                             n = float(val)
                             if n < min_val:
@@ -837,18 +837,6 @@ async def update_user_status():
         new_role = content.get("role")
         new_hospital = content.get("hospital")
 
-        if not uid:
-            return jsonify({'message': 'UID is required'}), 400
-        
-        updates = {}
-        if new_status is not None and new_status in ["active", "pending", "rejected"]:
-            updates["status"] = new_status
-        if new_role is not None and new_role in ["Medical physicist", "RSO", "Admin"]:
-            updates["role"] = new_role
-        if new_hospital is not None and new_hospital.strip() != "":
-            updates["hospital"] = new_hospital
-            updates["centerId"] = new_hospital # Ensure centerId is updated with hospital
-
         if not updates:
             return jsonify({'message': 'No valid fields provided for update'}), 400
 
@@ -923,7 +911,7 @@ async def update_user_status():
         app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
+        return jsonify({'message': str(e)}), 500
 
 # --- ADMIN: DELETE USER ---
 @app.route('/admin/delete-user', methods=['DELETE'])
@@ -1022,7 +1010,7 @@ async def get_hospital_qa_data():
                 energy = row.get("energy")
                 values = row.get("values", [])
                 if energy in results_data:
-                    results_data[energy] = (values + [""] * num_days)[:num_days]
+                    results_data[energy] = (values + [''] * num_days)[:num_days]
 
         final_table_data = []
         for energy_type in ENERGY_TYPES:
@@ -1033,7 +1021,7 @@ async def get_hospital_qa_data():
         app.logger.error(f"Error fetching hospital QA data for admin: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture get data errors
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f"Failed to fetch data: {str(e)}"}), 500
 
 # --- ADMIN: GET AUDIT LOGS ---
 @app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
@@ -1079,13 +1067,12 @@ async def get_audit_logs():
                 # Ensure it's a timezone-aware datetime object before conversion
                 if hasattr(log_data['timestamp'], 'astimezone'): # It's likely a Firestore Timestamp object from Firestore
                     utc_dt = log_data['timestamp'].astimezone(pytz.utc) 
-                elif isinstance(log_data['timestamp'], datetime): # It's a naive datetime, assume UTC if from server
+                elif isinstance(log_data['timestamp'], datetime): # It's a naive datetime, assume UTC for server timestamp
                     utc_dt = log_data['timestamp'].replace(tzinfo=pytz.utc)
                 else: # Fallback for unexpected timestamp types
                     utc_dt = None # Or handle more robustly if other types are expected
                 
                 if utc_dt:
-                    ist_dt = utc_dt.astimezone(ist_timezone) # Convert UTC to IST
                     # Format to DD/MM/YYYY, HH:MM:SS AM/PM - This is the format seen in your screenshot
                     log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
                 else:
@@ -1137,7 +1124,8 @@ async def export_excel():
         doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
         if doc.exists:
             for row in doc.to_dict().get("data", []):
-                energy, values = row.get("energy"), row.get("values", [])
+                energy = row.get("energy")
+                values = row.get("values", [])
                 if energy in energy_dict:
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
         

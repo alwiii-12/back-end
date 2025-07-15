@@ -34,7 +34,7 @@ import logging
 from calendar import monthrange
 from datetime import datetime, timedelta
 import re 
-import pytz # NEW: Import pytz for timezone handling
+import pytz # Import pytz for timezone handling
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -63,6 +63,697 @@ app = Flask(__name__)
 # For development, you might use "http://localhost:XXXX" or origins="*".
 # For production, specify your exact frontend domain(s).
 CORS(app, resources={r"/*": {"origins": "https://front-endnew.onrender.com"}})
+
+app.logger.setLevel(logging.DEBUG)
+
+# --- [EMAIL CONFIG] ---
+SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
+RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com') # This might be less used now
+APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
+
+# --- [EMAIL SENDER FUNCTION] ---
+# Consolidated email sending logic
+def send_notification_email(recipient_email, subject, body):
+    if not APP_PASSWORD:
+        app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
+        if sentry_sdk_configured:
+            sentry_sdk.capture_message(f"EMAIL_APP_PASSWORD not set. Cannot send notification to {recipient_email}.", level="warning")
+        return False
+    
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = recipient_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        app.logger.info(f"📧 Notification sent to {recipient_email}")
+        return True
+    except Exception as e:
+        app.logger.error(f"❌ Email error: {str(e)} for recipient {recipient_email}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e) # Capture the exception with Sentry
+        return False
+
+# --- [FIREBASE INIT] ---
+firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+if not firebase_json:
+    if sentry_sdk_configured:
+        sentry_sdk.capture_message("CRITICAL: FIREBASE_CREDENTIALS environment variable not set.", level="fatal")
+    raise Exception("FIREBASE_CREDENTIALS not set")
+firebase_dict = json.loads(firebase_json)
+
+# Check if a default app is already initialized before initializing
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_dict)
+    firebase_admin.initialize_app(cred)
+    app.logger.info("Firebase default app initialized.")
+else:
+    app.logger.info("Firebase default app already initialized, skipping init.")
+
+db = firestore.client()
+
+# Defined once here for consistency
+ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
+
+# --- VERIFY ADMIN TOKEN ---
+async def verify_admin_token(id_token):
+    try:
+        decoded_token = auth.verify_id_token(id_token)
+        uid = decoded_token['uid']
+        user_doc = db.collection('users').document(uid).get()
+        if user_doc.exists and user_doc.to_dict().get('role') == 'Admin':
+            return True, uid
+    except Exception as e:
+        app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e) # Capture token verification failures
+    return False, None
+
+# --- SIGNUP ---
+@app.route('/signup', methods=['POST'])
+def signup():
+    try:
+        user = request.get_json(force=True)
+        required = ['name', 'email', 'hospital', 'role', 'uid', 'status']
+        missing = [f for f in required if f not in user or user[f].strip() == ""]
+        if missing:
+            return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
+        user_ref = db.collection('users').document(user['uid'])
+        if user_ref.get().exists:
+            return jsonify({'status': 'error', 'message': 'User already exists'}), 409
+        user_ref.set({
+            'name': user['name'],
+            'email': user['email'].strip().lower(),
+            'hospital': user['hospital'],
+            'role': user['role'],
+            'centerId': user['hospital'], # Assuming hospital value is also the centerId
+            'status': user['status']
+        })
+        return jsonify({'status': 'success', 'message': 'User registered'}), 200
+    except Exception as e:
+        app.logger.error(f"Signup failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e) # Capture signup errors
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- LOGIN ---
+@app.route('/login', methods=['POST'])
+def login():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid", "").strip()
+        if not uid:
+            return jsonify({'status': 'error', 'message': 'Missing UID'}), 400
+        user_ref = db.collection("users").document(uid)
+        user_doc = user_ref.get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        return jsonify({
+            'status': 'success',
+            'hospital': user_data.get("hospital", ""),
+            'role': user_data.get("role", ""),
+            'uid': uid,
+            'centerId': user_data.get("centerId", ""),
+            'status': user_data.get("status", "unknown")
+        }), 200
+    except Exception as e:
+        app.logger.error(f"Login failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e) # Capture login errors
+        return jsonify({'status': 'error', 'message': 'Login failed'}), 500
+
+# --- NEW: Generic Log Event Endpoint ---
+@app.route('/log_event', methods=['POST', 'OPTIONS'])
+def log_event():
+    # For OPTIONS requests (preflight), Flask-CORS handles it automatically.
+    # No custom logic is usually needed here for OPTIONS.
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    try:
+        event_data = request.get_json(force=True)
+        
+        # Ensure minimum required fields for an audit log
+        if not event_data.get("action") or not event_data.get("userUid"):
+            app.logger.warning("Attempted to log event with missing action or userUid.")
+            return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
+
+        # Add server timestamp if not provided (frontend usually won't send it)
+        event_data["timestamp"] = firestore.SERVER_TIMESTAMP
+        
+        db.collection("audit_logs").add(event_data)
+        app.logger.info(f"Audit: Logged event '{event_data.get('action')}' for UID {event_data.get('userUid')}.")
+        return jsonify({'status': 'success', 'message': 'Event logged successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Error logging event: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- SAVE DATA ---
+@app.route('/save', methods=['POST'])
+def save_data():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid")
+        month_param = content.get("month")
+        raw_data = content.get("data")
+
+        user_doc = db.collection('users').document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+        user_status = user_data.get("status", "pending")
+
+        if user_status != "active":
+            return jsonify({'status': 'error', 'message': 'Account not active'}), 403
+        if not center_id:
+            return jsonify({'status': 'error', 'message': 'Missing centerId'}), 400
+        if not isinstance(raw_data, list):
+            return jsonify({'status': 'error', 'message': 'Invalid data'}), 400
+
+        month_doc_id = f"Month_{month_param}"
+        converted = [{"row": i, "energy": row[0], "values": row[1:]} for i, row in enumerate(raw_data) if len(row) > 1]
+        
+        # Before saving, get current data from DB to determine what's "new"
+        existing_doc = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id).get()
+        existing_data_map = {}
+        if existing_doc.exists:
+            for row in existing_doc.to_dict().get("data", []):
+                existing_data_map[row.get("energy")] = row.get("values", [])
+
+        db.collection("linac_data").document(center_id).collection("months").document(month_doc_id).set(
+            {"data": converted}, merge=True)
+        
+        # --- Anomaly Detection on newly changed or added data points (PLACEHOLDER) ---
+        anomalies_detected = []
+        
+        if anomalies_detected:
+            app.logger.info(f"Anomalies detected during save: {anomalies_detected}")
+
+        return jsonify({'status': 'success', 'anomalies': anomalies_detected}), 200
+    except Exception as e:
+        app.logger.error(f"Save data failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e) # Capture save data errors
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- LOAD DATA ---
+@app.route('/data', methods=['GET'])
+def get_data():
+    try:
+        month_param = request.args.get('month')
+        uid = request.args.get('uid')
+        if not month_param or not uid:
+            return jsonify({'error': 'Missing "month" or "uid"'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+        user_status = user_data.get("status", "pending")
+
+        if user_status != "active":
+            return jsonify({'error': 'Account not active'}), 403
+        if not center_id:
+            return jsonify({'error': 'Missing centerId'}), 400
+
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+
+        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+        if doc.exists:
+            for row in doc.to_dict().get("data", []):
+                energy, values = row.get("energy"), row.get("values", [])
+                if energy in energy_dict:
+                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
+
+        table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
+        return jsonify({'data': table}), 200
+    except Exception as e:
+        app.logger.error(f"Get data failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e) # Capture get data errors
+        return jsonify({'error': str(e)}), 500
+
+# --- ALERT EMAIL ---
+@app.route('/send-alert', methods=['POST'])
+async def send_alert():
+    try:
+        content = request.get_json(force=True)
+        current_out_values = content.get("outValues", [])
+        hospital = content.get("hospitalName", "Unknown")
+        uid = content.get("uid")
+        month_key = content.get("month")
+
+        if not uid or not month_key:
+            app.logger.warning("Missing UID or month key for alert processing.")
+            if sentry_sdk_configured:
+                sentry_sdk.capture_message("Missing UID or month key for alert processing.", level="warning")
+            return jsonify({'status': 'error', 'message': 'Missing UID or month for alert processing'}), 400
+
+        user_doc = db.collection('users').document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get('centerId')
+
+        if not center_id:
+            app.logger.warning(f"Center ID not found for user {uid} during alert processing.")
+            if sentry_sdk_configured:
+                sentry_sdk.capture_message(f"Center ID not found for user {uid} during alert processing.", level="warning")
+            return jsonify({'status': 'error', 'message': 'Center ID not found for user for alert processing'}), 400
+
+        rso_emails = []
+        try:
+            rso_users = db.collection('users') \
+                          .where('centerId', '==', center_id) \
+                          .where('role', '==', 'RSO') \
+                          .stream()
+            for rso_user in rso_users:
+                rso_data = rso_user.to_dict()
+                if 'email' in rso_data and rso_data['email']:
+                    rso_emails.append(rso_data['email'])
+            
+            if not rso_emails:
+                app.logger.info(f"No RSO email found for centerId: {center_id}. Alert not sent to RSO.")
+                if sentry_sdk_configured:
+                    sentry_sdk.capture_message(f"No RSO email found for centerId: {center_id}. Alert not sent.", level="info")
+                return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200
+
+        except Exception as e:
+            app.logger.error(f"Error fetching RSO emails for center {center_id}: {str(e)}", exc_info=True)
+            if sentry_sdk_configured:
+                sentry_sdk.capture_exception(e)
+            return jsonify({'status': 'error', 'message': 'Failed to fetch RSO emails'}), 500
+
+        if not APP_PASSWORD:
+            app.logger.warning("APP_PASSWORD not configured. Cannot send email.")
+            if sentry_sdk_configured:
+                sentry_sdk.capture_message("APP_PASSWORD not configured. Cannot send alert email.", level="warning")
+            return jsonify({'status': 'email_credentials_missing', 'message': 'Email credentials missing'}), 500
+
+        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}")
+        app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
+
+        alerts_doc_snap = month_alerts_doc_ref.get()
+        previously_alerted = []
+
+        if alerts_doc_snap.exists:
+            previously_alerted = alerts_doc_snap.to_dict().get("alerted_values", [])
+            app.logger.debug(f"Found {len(previously_alerted)} previously alerted values.")
+        else:
+            app.logger.debug(f"No existing alert record for {center_id}/{month_key}. This might be the first alert for this month.")
+
+        previously_alerted_strings = set(json.dumps(val, sort_keys=True) for val in previously_alerted)
+        current_out_values_strings = set(json.dumps(val, sort_keys=True) for val in current_out_values)
+
+        send_email_needed = False
+
+        if current_out_values_strings != previously_alerted_strings:
+            send_email_needed = True
+            app.logger.debug("Change in out-of-tolerance values detected. Email will be considered.")
+        else:
+            app.logger.info("No change in out-of-tolerance values since last alert. Email will not be sent.")
+            return jsonify({'status': 'no_change', 'message': 'No new alerts or changes to existing issues. Email not sent.'}), 200
+
+        message_body = f"LINAC QA Status Update for {hospital} ({month_key})\n\n"
+
+        if current_out_values:
+            message_body += "Current Out-of-Tolerance Values (±2.0%) or persisting issues:\n\n"
+            sorted_current_out_values = sorted(current_out_values, key=lambda x: (x.get('energy'), x.get('date')))
+            for v in sorted_current_out_values:
+                formatted_date = v.get('date', 'N/A')
+                message_body += f"Energy: {v.get('energy', 'N/A')}, Date: {formatted_date}, Value: {v.get('value', 'N/A')}%\n"
+            message_body += "\n"
+        elif previously_alerted:
+            message_body += "All previously detected LINAC QA issues for this month are now resolved.\n"
+        else:
+            message_body += "All LINAC QA values are currently within tolerance for this month.\n"
+        
+        email_sent = send_notification_email(", ".join(rso_emails), f"⚠ LINAC QA Status - {hospital} ({month_key})", message_body)
+
+        if email_sent:
+            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
+            app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
+            return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
+        else:
+            app.logger.error("Failed to send alert email via helper function.")
+            if sentry_sdk_configured:
+                sentry_sdk.capture_message("Failed to send alert email via helper function.", level="error")
+            return jsonify({'status': 'email_send_error', 'message': 'Failed to send email via helper function.'}), 500
+
+    except Exception as e:
+        app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- NEW: Chatbot Query Endpoint ---
+@app.route('/query-qa-data', methods=['POST'])
+def query_qa_data():
+    try:
+        content = request.get_json(force=True)
+        user_query_text = content.get("query_text", "") # Get the full text query from frontend
+        month_param = content.get("month")
+        uid = content.get("uid")
+        
+        # Parameters that can be extracted by parsing the raw text
+        energy_type = None 
+        date_param = None  
+
+        lower_case_query = user_query_text.lower()
+        # Removed cleaned_query_no_space as it's not strictly needed for this pattern of matching
+        # cleaned_query_no_space = lower_case_query.replace(" ", "")
+
+        # Attempt to extract energy type using keywords (more robust)
+        for e_type in ENERGY_TYPES:
+            # Check for exact matches of energy types (e.g., "6x", "10x", "6x fff")
+            if e_type.lower() in lower_case_query: # Use lower_case_query directly
+                energy_type = e_type
+                break
+        
+        # Attempt to extract date using regex (already existing, very robust)
+        date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
+        if date_match_regex:
+            date_param = date_match_regex.group(1)
+
+        query_type = "unknown" # Default classification
+
+        # Prioritize specific queries first, then general ones.
+        # Order matters here: More specific patterns should come before broader ones.
+
+        # Specific analytical queries that need energy_type
+        if "average deviation" in lower_case_query:
+            query_type = "average_deviation"
+        elif "max value" in lower_case_query or "highest value" in lower_case_query:
+            query_type = "max_value"
+        elif "min value" in lower_case_query or "lowest value" in lower_case_query:
+            query_type = "min_value"
+
+        # Queries that might need both energy_type and date_param
+        elif "value for" in lower_case_query or "status for" in lower_case_query:
+            query_type = "value_on_date"
+        elif "all values for" in lower_case_query or "all energies on" in lower_case_query:
+            query_type = "all_values_on_date"
+        elif "all" in lower_case_query and "data" in lower_case_query and "this month" in lower_case_query:
+            # Catches "all 6x data this month", "all 10x fff data this month"
+            query_type = "energy_data_for_month"
+            
+        # Other specific queries
+        elif "out of tolerance dates" in lower_case_query or "out of spec dates" in lower_case_query:
+            query_type = "out_of_tolerance_dates"
+        elif "warning values" in lower_case_query or "warnings for" in lower_case_query:
+            query_type = "warning_values_for_month"
+
+        # General greetings (lowest priority)
+        elif "hi" in lower_case_query or "hello" in lower_case_query or "hey" in lower_case_query:
+            query_type = "greeting"
+        elif "how are you" in lower_case_query:
+            query_type = "how_are_you"
+        elif "thank you" in lower_case_query or "thanks" in lower_case_query:
+            query_type = "thank_you"
+        
+        # --- NEW LOGIC FOR HANDLING PARTIAL QUERIES / CLARIFICATIONS ---
+        # This section provides more specific prompts based on missing info.
+        
+        if query_type == "value_on_date":
+            if not energy_type and not date_param:
+                return jsonify({'status': 'error', 'message': 'To get a specific value, please provide both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10).'}), 200
+            elif not energy_type:
+                return jsonify({'status': 'error', 'message': f'To get a value for {date_param}, please specify the energy type (e.g., 6X, 10X, 6E).'}), 200
+            elif not date_param:
+                return jsonify({'status': 'error', 'message': f'To get a value for {energy_type}, please specify the date in YYYY-MM-DD format (e.g., 2025-07-10).'}), 200
+        elif query_type == "energy_data_for_month" and not energy_type:
+             return jsonify({'status': 'error', 'message': 'To show all data for a specific energy this month, please specify the energy type (e.g., "all 6X data this month").'}), 200
+        elif (query_type == "average_deviation" or query_type == "max_value" or query_type == "min_value") and not energy_type:
+             return jsonify({'status': 'error', 'message': f'To calculate {query_type.replace("_", " ")} for an energy type, please specify the energy type (e.g., "{query_type.replace("_", " ")} for 6X").'}), 200
+        elif query_type == "all_values_on_date" and not date_param:
+             return jsonify({'status': 'error', 'message': 'To list all values for a specific date, please specify the date in YYYY-MM-DD format (e.g., "all values for 2025-07-05").'}), 200
+        elif query_type == "unknown": # Final fallback if none of the specific types or partials matched
+             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
+
+        # ... (rest of query_qa_data logic remains mostly the same, now guaranteed to have necessary params for its specific query_type) ...
+        # The subsequent 'if/elif' blocks for query_type (e.g., out_of_tolerance_dates, value_on_date)
+        # will now only execute if the required parameters (energy_type, date_param) are correctly extracted
+        # or were not needed for that specific query_type (like 'greeting').
+        # The 'else' at the very end of the function is now replaced by the 'unknown' check above.
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+
+        if not center_id:
+            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
+
+        # Helper to fetch current month's data
+        def get_current_month_qa_data(c_id, m_param):
+            doc = db.collection("linac_data").document(c_id).collection("months").document(f"Month_{m_param}").get()
+            data_rows = []
+            if doc.exists:
+                data_rows = doc.to_dict().get("data", [])
+            return data_rows
+        
+        data_rows_current_month = get_current_month_qa_data(center_id, month_param)
+
+        # --- Query Logic (Expanded) ---
+        if query_type == "out_of_tolerance_dates":
+            year, mon = map(int, month_param.split("-"))
+            _, num_days = monthrange(year, mon)
+            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
+            
+            out_dates = set()
+            for row in data_rows_current_month:
+                values = row.get("values", [])
+                for i, value in enumerate(values):
+                    try:
+                        n = float(value)
+                        if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
+                                if i < len(date_strings):
+                                    out_dates.add(date_strings[i])
+                    except (ValueError, TypeError):
+                        pass
+            
+            sorted_out_dates = sorted(list(out_dates))
+
+            return jsonify({'status': 'success', 'message': "The following dates had data beyond tolerance levels: " + (", ".join(sorted_out_dates) if sorted_out_dates else "None.")}), 200
+
+        elif query_type == "value_on_date":
+            # Parameters are guaranteed to be present by the NEW LOGIC above
+            try:
+                parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
+                if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
+                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
+                
+                day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
+
+            except ValueError:
+                app.logger.error(f"Invalid date format in /query-qa-data: {date_param}", exc_info=True)
+                if sentry_sdk_configured:
+                    sentry_sdk.capture_message(f"Invalid date format in /query-qa-data: {date_param}", level="warning")
+                return jsonify({'status': 'error', 'message': 'Invalid date format for the date you provided. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
+
+
+            found_value = None
+            found_status = "N/A"
+
+            for row in data_rows_current_month:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""): # Ensure matching cleaned energy types
+                    values = row.get("values", [])
+                    if day_index < len(values):
+                        found_value = values[day_index]
+                        try:
+                            n = float(found_value)
+                            if abs(n) <= 1.8:
+                                found_status = "Within Tolerance"
+                            elif abs(n) <= 2.0:
+                                found_status = "Warning"
+                            else:
+                                found_status = "Out of Tolerance"
+                        except (ValueError, TypeError):
+                            found_status = "Not a number"
+                    break
+            
+            if found_value is not None:
+                return jsonify({
+                    'status': 'success',
+                    'energy_type': energy_type, # Return params for frontend display
+                    'date': date_param, # Return params for frontend display
+                    'value': found_value, # Return actual value
+                    'data_status': found_status, # Return determined status
+                    'message': f"For {energy_type} on {date_param}: Value is {found_value}% (Status: {found_status})."
+                }), 200
+            else:
+                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
+
+        elif query_type == "energy_data_for_month":
+            # energy_type is guaranteed to be present by NEW LOGIC above
+            found_row = None
+            for row in data_rows_current_month:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
+                    found_row = row
+                    break
+            
+            if found_row:
+                year, mon = map(int, month_param.split("-"))
+                _, num_days = monthrange(year, mon)
+                dates = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
+                
+                formatted_data = []
+                values = found_row.get("values", [])
+                for i, val in enumerate(values):
+                    if i < len(dates) and (val is not None and val != ''): # Only include actual data points
+                        formatted_data.append({"date": dates[i], "value": val}) # Changed to structured data
+                
+                if formatted_data:
+                    return jsonify({'status': 'success', 'data': formatted_data, 'message': f"Here is the data for {energy_type} this month."}), 200
+                else:
+                    return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month."}), 200
+            else:
+                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} this month."}), 200
+
+        elif query_type == "warning_values_for_month":
+            year, mon = map(int, month_param.split("-"))
+            _, num_days = monthrange(year, mon)
+            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
+            
+            warning_entries = []
+            for row in data_rows_current_month:
+                energy_type_row = row.get("energy")
+                values = row.get("values", [])
+                for i, value in enumerate(values):
+                    try:
+                        n = float(value)
+                        if abs(n) > 1.8 and abs(n) <= 2.0:
+                            if i < len(date_strings):
+                                warning_entries.append({
+                                    "energy": energy_type_row,
+                                    "date": date_strings[i],
+                                    "value": n
+                                })
+                    except (ValueError, TypeError):
+                        pass
+            
+            sorted_warning_entries = sorted(warning_entries, key=lambda x: (x['date'], x['energy']))
+
+            if sorted_warning_entries:
+                # formatted_warnings = [f"{entry['energy']} on {entry['date']}: {entry['value']}%" for entry in sorted_warning_entries]
+                return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries, 'message': "Warning values this month."}), 200
+            else:
+                return jsonify({'status': 'success', 'message': "No warning values found this month. Great job!"}), 200
+
+        # --- ANALYTICAL QUERIES (Parameters guaranteed by NEW LOGIC above) ---
+
+        elif query_type == "average_deviation":
+            all_values = []
+            for row in data_rows_current_month:
+                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
+                    for val in row.get("values", []):
+                        try:
+                            n = float(val)
+                            all_values.append(n)
+                        except (ValueError, TypeError):
+                            pass
+            if all_values:
+                avg = np.mean(all_values)
+                return jsonify({'status': 'success', 'average_deviation': round(avg, 2), 'message': f"The average deviation for {energy_type} this month is {avg:.2f}%."}), 200
+            else:
+                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to calculate average."}), 200
+        
+        elif query_type == "max_value":
+            max_val = -float('inf')
+            max_date = "N/A"
+            year, mon = map(int, month_param.split("-"))
+            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
+            
+            for row in data_ Pachas, your screenshot reveals two key issues:
+
+1.  **Date Format Inconsistency:** The log shows "Invalid Date" for most entries, but some later entries like "7/11/2025, 10:53:11 PM" are successfully parsed. This indicates a formatting mismatch. My previous fix for IST conversion used a different format that the frontend JavaScript couldn't interpret as a valid date string.
+2.  **Time Zone Discrepancy:** Even for the valid dates, the times (`10:53:11 PM`, `6:00:06 PM`) are likely in UTC (Coordinated Universal Time), while you want them displayed in IST (Indian Standard Time, UTC+5:30).
+
+My apologies for the confusion and for not getting the date formatting correct in the previous step. We need to ensure the backend provides the date string in a format that the frontend's JavaScript can consistently parse. The `7/11/2025, 10:53:11 PM` format seen in your screenshot indicates that `DD/MM/YYYY, HH:MM:SS AM/PM` is indeed a format your frontend can handle.
+
+Let's fix this directly and robustly using the `pytz` library (which is already in your `requirements.txt`).
+
+Here is the **full, corrected `app.py` code** with the specific timestamp formatting change for the audit logs.
+
+```python
+# --- [SENTRY INTEGRATION - NEW IMPORTS AND INITIALIZATION] ---
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
+import os
+
+# Retrieve Sentry DSN from environment variable
+SENTRY_DSN = os.environ.get("SENTRY_DSN")
+
+sentry_sdk_configured = False # Flag to track Sentry initialization
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[
+            FlaskIntegration(),
+        ],
+        traces_sample_rate=1.0, # Capture 100% of transactions for performance monitoring
+        profiles_sample_rate=1.0, # Capture 100% of active samples for profiling
+        send_default_pii=True # Enable sending of PII (Personally Identifiable Information)
+    )
+    sentry_sdk_configured = True
+    print("Sentry initialized successfully.")
+else:
+    print("SENTRY_DSN environment variable not set. Sentry not initialized.")
+
+
+# --- [UNCHANGED IMPORTS] ---
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import json
+import logging
+from calendar import monthrange
+from datetime import datetime, timedelta
+import re 
+import pytz # Import pytz for timezone handling
+
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
+
+# New imports for Excel export
+import pandas as pd
+from io import BytesIO
+
+# REMOVED: NEW IMPORTS FOR CHATBOT NLP & MATH (spacy, numpy, collections.defaultdict)
+# import spacy
+# import numpy as np
+# from collections import defaultdict
+
+# REMOVED: NEW: Imports for os.path operations and sys.path modification (sys)
+# import sys 
+
+
+# Set nlp to None explicitly, as it's no longer loaded
+nlp = None # This makes sure the 'nlp is None' check always passes
+
+
+app = Flask(__name__)
+
+# Explicitly configure CORS to allow your frontend origin
+# IMPORTANT: Replace '[https://front-endnew.onrender.com](https://front-endnew.onrender.com)' with your actual deployed frontend URL.
+# For development, you might use "http://localhost:XXXX" or origins="*".
+# For production, specify your exact frontend domain(s).
+CORS(app, resources={r"/*": {"origins": "[https://front-endnew.onrender.com](https://front-endnew.onrender.com)"}})
 
 app.logger.setLevel(logging.DEBUG)
 
@@ -720,7 +1411,7 @@ def query_qa_data():
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year. Please ensure the date is within the current selected month.'}), 200
+                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
                 day_index = parsed_date_obj.day - 1 
             except ValueError:
                 return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
@@ -1085,9 +1776,8 @@ async def get_audit_logs():
                     utc_dt = None # Or handle more robustly if other types are expected
                 
                 if utc_dt:
-                    ist_dt = utc_dt.astimezone(ist_timezone) # Convert UTC to IST
-                    # Format for display in a common, easily parseable string format
-                    log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") # e.g., "15/07/2025, 05:05:31 AM"
+                    # Format to DD/MM/YYYY, HH:MM:SS AM/PM
+                    log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
                 else:
                     log_data['timestamp'] = 'Invalid Date/Time' # Indicate issue if conversion fails
             else:

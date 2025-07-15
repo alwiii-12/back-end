@@ -34,7 +34,7 @@ import logging
 from calendar import monthrange
 from datetime import datetime, timedelta
 import re 
-import pytz # NEW: Import pytz for timezone handling
+import pytz # Import pytz for timezone handling
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -701,7 +701,7 @@ def query_qa_data():
             
             for row in data_rows_current_month:
                 if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for i, val in enumerate(row.get("values", [])):
+                    for i, val in enumerate(row.get("values", [])): # Iterate over row.get("values", [])
                         try:
                             n = float(val)
                             if n < min_val:
@@ -716,11 +716,12 @@ def query_qa_data():
                 return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find min value."}), 200
 
         elif query_type == "all_values_on_date":
-            # date_param is guaranteed to be present by NEW LOGIC above
+            if not date_param:
+                return jsonify({'status': 'error', 'message': 'I need a specific date (e.g., 2025-07-10) to list all values for it.'}), 400
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
+                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year. Please ensure the date is within the current selected month.'}), 200
                 day_index = parsed_date_obj.day - 1 
             except ValueError:
                 return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
@@ -732,10 +733,10 @@ def query_qa_data():
                 if day_index < len(values):
                     val = values[day_index]
                     if val != '':
-                        daily_data.append({"energy": energy_type_row, "value": val}) # Changed to structured data
+                        daily_data.append(f"{energy_type_row}: {val}%")
             
             if daily_data:
-                return jsonify({'status': 'success', 'daily_data': daily_data, 'message': f"Data for {date_param}:"}), 200
+                return jsonify({'status': 'success', 'message': f"Data for {date_param}: {'; '.join(daily_data)}."}), 200
             else:
                 return jsonify({'status': 'success', 'message': f"No data found for {date_param}."}), 200
 
@@ -743,11 +744,10 @@ def query_qa_data():
             return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
         elif query_type == "how_are_you":
             return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
-        elif "thank you" in lower_case_query or "thanks" in lower_case_query: 
+        elif query_type == "thank_you":
             return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
         else:
-            # This 'else' should ideally not be reached if previous 'unknown' check covers everything.
-            # But kept as final safety net.
+            # Fallback for unrecognized queries
             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
 
     except Exception as e:
@@ -836,6 +836,18 @@ async def update_user_status():
         new_status = content.get("status")
         new_role = content.get("role")
         new_hospital = content.get("hospital")
+
+        if not uid:
+            return jsonify({'message': 'UID is required'}), 400
+        
+        updates = {}
+        if new_status is not None and new_status in ["active", "pending", "rejected"]:
+            updates["status"] = new_status
+        if new_role is not None and new_role in ["Medical physicist", "RSO", "Admin"]:
+            updates["role"] = new_role
+        if new_hospital is not None and new_hospital.strip() != "":
+            updates["hospital"] = new_hospital
+            updates["centerId"] = new_hospital # Ensure centerId is updated with hospital
 
         if not updates:
             return jsonify({'message': 'No valid fields provided for update'}), 400
@@ -1067,12 +1079,13 @@ async def get_audit_logs():
                 # Ensure it's a timezone-aware datetime object before conversion
                 if hasattr(log_data['timestamp'], 'astimezone'): # It's likely a Firestore Timestamp object from Firestore
                     utc_dt = log_data['timestamp'].astimezone(pytz.utc) 
-                elif isinstance(log_data['timestamp'], datetime): # It's a naive datetime, assume UTC for server timestamp
+                elif isinstance(log_data['timestamp'], datetime): # It's a naive datetime, assume UTC if from server
                     utc_dt = log_data['timestamp'].replace(tzinfo=pytz.utc)
                 else: # Fallback for unexpected timestamp types
                     utc_dt = None # Or handle more robustly if other types are expected
                 
                 if utc_dt:
+                    ist_dt = utc_dt.astimezone(ist_timezone) # Convert UTC to IST
                     # Format to DD/MM/YYYY, HH:MM:SS AM/PM - This is the format seen in your screenshot
                     log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
                 else:
@@ -1124,8 +1137,7 @@ async def export_excel():
         doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
         if doc.exists:
             for row in doc.to_dict().get("data", []):
-                energy = row.get("energy")
-                values = row.get("values", [])
+                energy, values = row.get("energy"), row.get("values", [])
                 if energy in energy_dict:
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
         

@@ -482,7 +482,7 @@ def query_qa_data():
             query_type = "greeting"
         elif "how are you" in lower_case_query:
             query_type = "how_are_you"
-        elif "thank you" in lower_case_query or "thanks" in lower_case_query: 
+        elif "thank you" in lower_case_query or "thanks" in lower_case_query:
             query_type = "thank_you"
         
         # --- NEW LOGIC FOR HANDLING PARTIAL QUERIES / CLARIFICATIONS ---
@@ -703,7 +703,7 @@ def query_qa_data():
             
             for row in data_rows_current_month:
                 if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for i, val in enumerate(row.get("values", [])): # Changed from `enumerate(values)`
+                    for i, val in enumerate(row.get("values", [])): # Iterate over row.get("values", [])
                         try:
                             n = float(val)
                             if n < min_val:
@@ -1071,11 +1071,17 @@ async def get_audit_logs():
 
         logs_stream = logs_query.stream()
         all_logs = []
+        # Define IST timezone offset
+        IST_OFFSET = timedelta(hours=5, minutes=30) # Indian Standard Time is UTC+5:30
+
         for doc in logs_stream:
             log_data = doc.to_dict()
             # Convert Firestore Timestamp to string for JSON serialization
             if 'timestamp' in log_data and hasattr(log_data['timestamp'], 'strftime'):
-                log_data['timestamp'] = log_data['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+                # Convert UTC timestamp to IST
+                utc_dt = log_data['timestamp'].replace(tzinfo=None) # Remove timezone info from naive datetime
+                ist_dt = utc_dt + IST_OFFSET # Apply offset
+                log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") # Format for display 
             all_logs.append(log_data)
 
         return jsonify({'status': 'success', 'logs': all_logs}), 200

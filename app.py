@@ -559,7 +559,7 @@ def query_qa_data():
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 400
+                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
                 
                 day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
 
@@ -593,10 +593,6 @@ def query_qa_data():
             if found_value is not None:
                 return jsonify({
                     'status': 'success',
-                    'energy_type': energy_type, # Return params for frontend display
-                    'date': date_param, # Return params for frontend display
-                    'value': found_value, # Return actual value
-                    'data_status': found_status, # Return determined status
                     'message': f"For {energy_type} on {date_param}: Value is {found_value}% (Status: {found_status})."
                 }), 200
             else:
@@ -734,7 +730,7 @@ def query_qa_data():
             try:
                 parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
                 if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': 'Date provided does not match the current month/year. Please ensure the date is within the current selected month.'}), 400
+                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
                 day_index = parsed_date_obj.day - 1 
             except ValueError:
                 return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400

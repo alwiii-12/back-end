@@ -427,86 +427,134 @@ def query_qa_data():
         month_param = content.get("month")
         uid = content.get("uid")
         
-        # Parameters that can be extracted by parsing the raw text
-        energy_type = None 
-        date_param = None  
+        # Parameters that can be extracted by NLP or provided as fallback
+        energy_type = content.get("energy_type") 
+        date_param = content.get("date")
 
-        lower_case_query = user_query_text.lower()
-        # Removed cleaned_query_no_space as it's not strictly needed for this pattern of matching
-        # cleaned_query_no_space = lower_case_query.replace(" ", "")
+        if not user_query_text or not month_param or not uid:
+            return jsonify({'status': 'error', 'message': 'Missing query text, month, or UID'}), 400
 
-        # Attempt to extract energy type using keywords (more robust)
-        for e_type in ENERGY_TYPES:
-            # Check for exact matches of energy types (e.g., "6x", "10x", "6x fff")
-            if e_type.lower() in lower_case_query: # Use lower_case_query directly
-                energy_type = e_type
-                break
-        
-        # Attempt to extract date using regex (already existing, very robust)
-        date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
-        if date_match_regex:
-            date_param = date_match_regex.group(1)
-
-        query_type = "unknown" # Default classification
-
-        # Prioritize specific queries first, then general ones.
-        # Order matters here: More specific patterns should come before broader ones.
-
-        # Specific analytical queries that need energy_type
-        if "average deviation" in lower_case_query:
-            query_type = "average_deviation"
-        elif "max value" in lower_case_query or "highest value" in lower_case_query:
-            query_type = "max_value"
-        elif "min value" in lower_case_query or "lowest value" in lower_case_query:
-            query_type = "min_value"
-
-        # Queries that might need both energy_type and date_param
-        elif "value for" in lower_case_query or "status for" in lower_case_query:
-            query_type = "value_on_date"
-        elif "all values for" in lower_case_query or "all energies on" in lower_case_query:
-            query_type = "all_values_on_date"
-        elif "all" in lower_case_query and "data" in lower_case_query and "this month" in lower_case_query:
-            # Catches "all 6x data this month", "all 10x fff data this month"
-            query_type = "energy_data_for_month"
+        # --- NEW: Check if NLP model is loaded first ---
+        if nlp is None:
+            # Fallback to simple keyword matching if NLP model isn't available
+            lower_case_query = user_query_text.lower()
+            if "out of tolerance dates" in lower_case_query:
+                query_type = "out_of_tolerance_dates"
+            elif "warning values" in lower_case_query:
+                query_type = "warning_values_for_month"
+            elif "average deviation" in lower_case_query and ("6x" in lower_case_query or "10x" in lower_case_query or "15x" in lower_case_query or "6x fff" in lower_case_query or "10x fff" in lower_case_query or "6e" in lower_case_query or "9e" in lower_case_query or "12e" in lower_case_query or "15e" in lower_case_query or "18e" in lower_case_query):
+                query_type = "average_deviation"
+                for e_type in ENERGY_TYPES: # Basic extraction without full NLP
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+            elif "max value" in lower_case_query or "highest value" in lower_case_query:
+                query_type = "max_value"
+                for e_type in ENERGY_TYPES:
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+            elif "min value" in lower_case_query or "lowest value" in lower_case_query:
+                query_type = "min_value"
+                for e_type in ENERGY_TYPES:
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+            elif "all values for" in lower_case_query or "all energies on" in lower_case_query:
+                query_type = "all_values_on_date"
+                date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
+                if date_match_regex: date_param = date_match_regex.group(1)
+            elif "value for" in lower_case_query or "status for" in lower_case_query:
+                query_type = "value_on_date"
+                for e_type in ENERGY_TYPES:
+                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
+                        energy_type = e_type
+                        break
+                date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
+                if date_match_regex: date_param = date_match_regex.group(1)
+            elif "hi" in lower_case_query or "hello" in lower_case_query or "hey" in lower_case_query:
+                query_type = "greeting"
+            elif "how are you" in lower_case_query:
+                query_type = "how_are_you"
+            elif "thank you" in lower_case_query or "thanks" in lower_case_query:
+                query_type = "thank_you"
+            else:
+                return jsonify({'status': 'error', 'message': 'Chatbot is currently in limited mode. Please use exact phrases like "Out of tolerance dates", "Value for 6X on 2025-07-10", "Average deviation for 6X this month", or "List all warning values".'}), 503
             
-        # Other specific queries
-        elif "out of tolerance dates" in lower_case_query or "out of spec dates" in lower_case_query:
-            query_type = "out_of_tolerance_dates"
-        elif "warning values" in lower_case_query or "warnings for" in lower_case_query:
-            query_type = "warning_values_for_month"
+            # If a query type was determined via fallback, but missing parameters, let specific query handle error
+            # If no query type was determined, then it returns the error above
+        else:
+            # Full NLP processing
+            doc = nlp(user_query_text.lower())
+            
+            # Attempt to extract energy type from tokens/entities
+            if not energy_type:
+                # Prioritize a custom entity if you had one, otherwise go for known energy type strings
+                found_energy_in_nlp = False
+                for ent in doc.ents: # If you train a custom 'ENERGY' entity
+                    if ent.label_ == "ENERGY":
+                        extracted_energy = ent.text.upper().replace(" ", "")
+                        if extracted_energy in [e.replace(" ", "") for e in ENERGY_TYPES]:
+                            energy_type = extracted_energy
+                            found_energy_in_nlp = True
+                            break
+                if not found_energy_in_nlp: # Fallback to keyword matching if no explicit entity
+                    for e_type in ENERGY_TYPES:
+                        # Use direct string check as spacy doesn't always make named entities for specific codes like '6X'
+                        if e_type.lower().replace(" ", "") in user_query_text.lower().replace(" ", ""):
+                            energy_type = e_type
+                            break
 
-        # General greetings (lowest priority)
-        elif "hi" in lower_case_query or "hello" in lower_case_query or "hey" in lower_case_query:
-            query_type = "greeting"
-        elif "how are you" in lower_case_query:
-            query_type = "how_are_you"
-        elif "thank you" in lower_case_query or "thanks" in lower_case_query:
-            query_type = "thank_you"
-        
-        # --- NEW LOGIC FOR HANDLING PARTIAL QUERIES / CLARIFICATIONS ---
-        # This section provides more specific prompts based on missing info.
-        
-        if query_type == "value_on_date":
-            if not energy_type and not date_param:
-                return jsonify({'status': 'error', 'message': 'To get a specific value, please provide both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10).'}), 200
-            elif not energy_type:
-                return jsonify({'status': 'error', 'message': f'To get a value for {date_param}, please specify the energy type (e.g., 6X, 10X, 6E).'}), 200
-            elif not date_param:
-                return jsonify({'status': 'error', 'message': f'To get a value for {energy_type}, please specify the date in YYYY-MM-DD format (e.g., 2025-07-10).'}), 200
-        elif query_type == "energy_data_for_month" and not energy_type:
-             return jsonify({'status': 'error', 'message': 'To show all data for a specific energy this month, please specify the energy type (e.g., "all 6X data this month").'}), 200
-        elif (query_type == "average_deviation" or query_type == "max_value" or query_type == "min_value") and not energy_type:
-             return jsonify({'status': 'error', 'message': f'To calculate {query_type.replace("_", " ")} for an energy type, please specify the energy type (e.g., "{query_type.replace("_", " ")} for 6X").'}), 200
-        elif query_type == "all_values_on_date" and not date_param:
-             return jsonify({'status': 'error', 'message': 'To list all values for a specific date, please specify the date in YYYY-MM-DD format (e.g., "all values for 2025-07-05").'}), 200
-        elif query_type == "unknown": # Final fallback if none of the specific types or partials matched
-             return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
+            if not date_param:
+                for ent in doc.ents:
+                    if ent.label_ == "DATE":
+                        try:
+                            # Try parsing various common date formats directly from the entity text
+                            parsed_date = None
+                            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"): # More formats for robustness
+                                try:
+                                    parsed_date = datetime.strptime(ent.text, fmt)
+                                    break
+                                except ValueError:
+                                    pass
+                            if parsed_date:
+                                date_param = parsed_date.strftime("%Y-%m-%d")
+                                break # Found a date, break entity loop
+                        except Exception:
+                            pass
+                # Fallback to regex if NLP entity or initial parsing failed to be safe
+                if not date_param:
+                    date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
+                    if date_match_regex:
+                        date_param = date_match_regex.group(1)
 
-        # ... (rest of query_qa_data logic remains mostly the same, now guaranteed to have necessary params for its specific query_type) ...
-        # The subsequent 'if/elif' blocks for query_type (e.g., out_of_tolerance_dates, value_on_date)
-        # will now only execute if the required parameters (energy_type, date_param) are correctly extracted
-        # or were not needed for that specific query_type (like 'greeting').
-        # The 'else' at the very end of the function is now replaced by the 'unknown' check above.
+
+            # Determine query type based on keywords and extracted entities
+            if "out of tolerance dates" in user_query_text.lower() or "out of spec dates" in user_query_text.lower():
+                query_type = "out_of_tolerance_dates"
+            elif ("value for" in user_query_text.lower() or "status for" in user_query_text.lower()) and energy_type and date_param:
+                query_type = "value_on_date"
+            elif ("show all" in user_query_text.lower() or "all data" in user_query_text.lower()) and energy_type:
+                query_type = "energy_data_for_month"
+            elif "warning values" in lower_case_query or "warnings for" in lower_case_query:
+                query_type = "warning_values_for_month"
+            elif "average deviation" in lower_case_query:
+                query_type = "average_deviation"
+            elif "max value" in lower_case_query or "highest value" in lower_case_query:
+                query_type = "max_value"
+            elif "min value" in lower_case_query or "lowest value" in lower_case_query:
+                query_type = "min_value"
+            elif ("all values for" in user_query_text.lower() or "all energies on" in user_query_text.lower()) and date_param:
+                query_type = "all_values_on_date"
+            elif "hi" in user_query_text.lower() or "hello" in user_query_text.lower() or "hey" in user_case_query:
+                query_type = "greeting"
+            elif "how are you" in lower_case_query:
+                query_type = "how_are_you"
+            elif "thank you" in lower_case_query or "thanks" in lower_case_query:
+                query_type = "thank_you"
+            else:
+                query_type = "unknown"
+
 
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:

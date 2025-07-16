@@ -818,9 +818,9 @@ def query_qa_data():
 
 # --- ADMIN: GET PENDING USERS ---
 @app.route('/admin/pending-users', methods=['GET'])
-def get_pending_users(): # Changed to synchronous function
+def get_pending_users():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token) # Removed await
+    is_admin, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
@@ -834,9 +834,9 @@ def get_pending_users(): # Changed to synchronous function
 
 # --- ADMIN: GET ALL USERS (with optional filters) ---
 @app.route('/admin/users', methods=['GET'])
-def get_all_users(): # Changed to synchronous function
+def get_all_users():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token) # Removed await
+    is_admin, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -880,9 +880,9 @@ def get_all_users(): # Changed to synchronous function
 
 # --- ADMIN: UPDATE USER STATUS, ROLE, OR HOSPITAL ---
 @app.route('/admin/update-user-status', methods=['POST'])
-def update_user_status(): # Changed to synchronous function
+def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token) # Removed await
+    is_admin, admin_uid_from_token = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
@@ -987,9 +987,9 @@ def update_user_status(): # Changed to synchronous function
 
 # --- ADMIN: DELETE USER ---
 @app.route('/admin/delete-user', methods=['DELETE'])
-def delete_user(): # Changed to synchronous function
+def delete_user():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token) # Removed await
+    is_admin, admin_uid_from_token = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1052,12 +1052,12 @@ def delete_user(): # Changed to synchronous function
 
 # --- ADMIN: GET HOSPITAL QA DATA ---
 @app.route('/admin/hospital-data', methods=['GET', 'OPTIONS'])
-def get_hospital_qa_data(): # Changed to synchronous function
+def get_hospital_qa_data():
     if request.method == 'OPTIONS': # Handle CORS preflight explicitly if needed
         return '', 200
 
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token) # Removed await
+    is_admin, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1097,12 +1097,12 @@ def get_hospital_qa_data(): # Changed to synchronous function
 
 # --- ADMIN: GET AUDIT LOGS ---
 @app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
-def get_audit_logs(): # Changed to synchronous function
+def get_audit_logs():
     if request.method == 'OPTIONS': # Handle CORS preflight explicitly
         return '', 200
 
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token) # Removed await
+    is_admin, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1148,7 +1148,7 @@ def get_audit_logs(): # Changed to synchronous function
                 
                 if utc_dt:
                     # Convert UTC datetime to IST
-                    [cite_start]ist_dt = utc_dt.astimezone(ist_timezone) # THIS LINE WAS ADDED TO FIX THE NameError [cite: 1]
+                    ist_dt = utc_dt.astimezone(ist_timezone) # THIS LINE WAS ADDED TO FIX THE NameError AND HAS BEEN RE-ADDED
                     # Format to DD/MM/YYYY, HH:MM:SS AM/PM - This is the format seen in your screenshot
                     log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
                 else:
@@ -1172,7 +1172,7 @@ def get_audit_logs(): # Changed to synchronous function
 
 # --- Excel Export Endpoint ---
 @app.route('/export-excel', methods=['POST'])
-def export_excel(): # Changed to synchronous function
+def export_excel():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")

@@ -45,7 +45,7 @@ from io import BytesIO
 
 # REMOVED: NEW IMPORTS FOR CHATBOT NLP & MATH (spacy, numpy, collections.defaultdict)
 # import spacy
-# import numpy as np
+import numpy as np # Retaining numpy as it's used for average_deviation
 # from collections import defaultdict
 
 # REMOVED: NEW: Imports for os.path operations and sys.path modification (sys)
@@ -121,7 +121,8 @@ db = firestore.client()
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
 # --- VERIFY ADMIN TOKEN ---
-async def verify_admin_token(id_token):
+# Changed to synchronous function as discussed, given Gunicorn WSGI server
+def verify_admin_token(id_token):
     try:
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token['uid']
@@ -306,8 +307,9 @@ def get_data():
         return jsonify({'error': str(e)}), 500
 
 # --- ALERT EMAIL ---
+# Changed to synchronous function as discussed, given Gunicorn WSGI server
 @app.route('/send-alert', methods=['POST'])
-async def send_alert():
+def send_alert():
     try:
         content = request.get_json(force=True)
         current_out_values = content.get("outValues", [])
@@ -442,7 +444,7 @@ def query_qa_data():
                 query_type = "out_of_tolerance_dates"
             elif "warning values" in lower_case_query:
                 query_type = "warning_values_for_month"
-            elif "average deviation" in lower_case_query and ("6x" in lower_case_query or "10x" in lower_case_query or "15x" in lower_case_query or "6x fff" in lower_case_query or "10x fff" in lower_case_query or "6e" in lower_case_query or "9e" in lower_case_query or "12e" in lower_case_query or "15e" in lower_case_query or "18e" in lower_case_query):
+            elif "average deviation" in lower_case_query and any(e.lower().replace(" ", "") in lower_case_query.replace(" ", "") for e in ENERGY_TYPES):
                 query_type = "average_deviation"
                 for e_type in ENERGY_TYPES: # Basic extraction without full NLP
                     if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
@@ -546,7 +548,7 @@ def query_qa_data():
                 query_type = "min_value"
             elif ("all values for" in user_query_text.lower() or "all energies on" in user_query_text.lower()) and date_param:
                 query_type = "all_values_on_date"
-            elif "hi" in user_query_text.lower() or "hello" in user_query_text.lower() or "hey" in user_case_query:
+            elif "hi" in user_query_text.lower() or "hello" in user_query_text.lower() or "hey" in user_query_text.lower():
                 query_type = "greeting"
             elif "how are you" in lower_case_query:
                 query_type = "how_are_you"
@@ -638,6 +640,10 @@ def query_qa_data():
             if found_value is not None:
                 return jsonify({
                     'status': 'success',
+                    'value': found_value, # Ensure these fields are returned as expected by frontend chatbot logic
+                    'energy_type': energy_type,
+                    'date': date_param,
+                    'data_status': found_status, # Use data_status to avoid conflict with 'status'
                     'message': f"For {energy_type} on {date_param}: Value is {found_value}% (Status: {found_status})."
                 }), 200
             else:
@@ -662,10 +668,10 @@ def query_qa_data():
                 values = found_row.get("values", [])
                 for i, val in enumerate(values):
                     if i < len(dates) and (val is not None and val != ''): # Only include actual data points
-                        formatted_data.append(f"{dates[i]}: {val}%")
-
+                        formatted_data.append({"date": dates[i], "value": val}) # Return structured data
+                
                 if formatted_data:
-                    return jsonify({'status': 'success', 'message': f"Here is the data for {energy_type} this month: {'; '.join(formatted_data)}."}), 200
+                    return jsonify({'status': 'success', 'data': formatted_data, 'message': f"Here is the data for {energy_type} this month."}), 200
                 else:
                     return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month."}), 200
             else:
@@ -696,8 +702,8 @@ def query_qa_data():
             sorted_warning_entries = sorted(warning_entries, key=lambda x: (x['date'], x['energy']))
 
             if sorted_warning_entries:
-                formatted_warnings = [f"{entry['energy']} on {entry['date']}: {entry['value']}%" for entry in sorted_warning_entries]
-                return jsonify({'status': 'success', 'message': "Warning values this month: " + "; ".join(formatted_warnings) + "."}), 200
+                # Returning the structured data directly for frontend processing
+                return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries, 'message': "Warning values this month."}), 200
             else:
                 return jsonify({'status': 'success', 'message': "No warning values found this month. Great job!"}), 200
 
@@ -812,9 +818,9 @@ def query_qa_data():
 
 # --- ADMIN: GET PENDING USERS ---
 @app.route('/admin/pending-users', methods=['GET'])
-async def get_pending_users():
+def get_pending_users(): # Changed to synchronous function
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
+    is_admin, _ = verify_admin_token(token) # Removed await
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
@@ -828,9 +834,9 @@ async def get_pending_users():
 
 # --- ADMIN: GET ALL USERS (with optional filters) ---
 @app.route('/admin/users', methods=['GET'])
-async def get_all_users():
+def get_all_users(): # Changed to synchronous function
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
+    is_admin, _ = verify_admin_token(token) # Removed await
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -874,9 +880,9 @@ async def get_all_users():
 
 # --- ADMIN: UPDATE USER STATUS, ROLE, OR HOSPITAL ---
 @app.route('/admin/update-user-status', methods=['POST'])
-async def update_user_status():
+def update_user_status(): # Changed to synchronous function
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = await verify_admin_token(token) # Get admin_uid from token here
+    is_admin, admin_uid_from_token = verify_admin_token(token) # Removed await
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
@@ -981,9 +987,9 @@ async def update_user_status():
 
 # --- ADMIN: DELETE USER ---
 @app.route('/admin/delete-user', methods=['DELETE'])
-async def delete_user():
+def delete_user(): # Changed to synchronous function
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = await verify_admin_token(token) # Get admin_uid here
+    is_admin, admin_uid_from_token = verify_admin_token(token) # Removed await
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1046,12 +1052,12 @@ async def delete_user():
 
 # --- ADMIN: GET HOSPITAL QA DATA ---
 @app.route('/admin/hospital-data', methods=['GET', 'OPTIONS'])
-async def get_hospital_qa_data():
+def get_hospital_qa_data(): # Changed to synchronous function
     if request.method == 'OPTIONS': # Handle CORS preflight explicitly if needed
         return '', 200
 
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
+    is_admin, _ = verify_admin_token(token) # Removed await
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1091,12 +1097,12 @@ async def get_hospital_qa_data():
 
 # --- ADMIN: GET AUDIT LOGS ---
 @app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
-async def get_audit_logs():
+def get_audit_logs(): # Changed to synchronous function
     if request.method == 'OPTIONS': # Handle CORS preflight explicitly
         return '', 200
 
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = await verify_admin_token(token)
+    is_admin, _ = verify_admin_token(token) # Removed await
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1130,15 +1136,19 @@ async def get_audit_logs():
             log_data = doc.to_dict()
             # Convert Firestore Timestamp to string for JSON serialization
             if 'timestamp' in log_data and log_data['timestamp'] is not None:
-                # Ensure it's a timezone-aware datetime object before conversion
-                if hasattr(log_data['timestamp'], 'astimezone'): # It's likely a Firestore Timestamp object from Firestore
+                # Ensure it's a Firestore Timestamp object from Firestore and convert to datetime
+                if hasattr(log_data['timestamp'], 'astimezone'): 
+                    # If it's a Firestore Timestamp object, convert it to a timezone-aware UTC datetime
                     utc_dt = log_data['timestamp'].astimezone(pytz.utc) 
-                elif isinstance(log_data['timestamp'], datetime): # It's a naive datetime, assume UTC if from server
+                elif isinstance(log_data['timestamp'], datetime): 
+                    # If it's already a naive datetime, assume UTC and make it timezone-aware
                     utc_dt = log_data['timestamp'].replace(tzinfo=pytz.utc)
-                else: # Fallback for unexpected timestamp types
+                else: 
                     utc_dt = None # Or handle more robustly if other types are expected
                 
                 if utc_dt:
+                    # Convert UTC datetime to IST
+                    [cite_start]ist_dt = utc_dt.astimezone(ist_timezone) # THIS LINE WAS ADDED TO FIX THE NameError [cite: 1]
                     # Format to DD/MM/YYYY, HH:MM:SS AM/PM - This is the format seen in your screenshot
                     log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
                 else:
@@ -1162,7 +1172,7 @@ async def get_audit_logs():
 
 # --- Excel Export Endpoint ---
 @app.route('/export-excel', methods=['POST'])
-async def export_excel():
+def export_excel(): # Changed to synchronous function
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")

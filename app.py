@@ -323,10 +323,7 @@ async def send_alert():
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
-            app.logger.warning(f"User document not found for UID: {uid} during alert processing.")
-            if sentry_sdk_configured:
-                sentry_sdk.capture_message(f"User document not found for UID: {uid} during alert processing.", level="warning")
-            return jsonify({'status': 'error', 'message': 'User not found for alert processing'}), 404
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
         user_data = user_doc.to_dict()
         center_id = user_data.get('centerId')
 
@@ -932,7 +929,7 @@ async def update_user_status():
         app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-        return jsonify({'message': str(e)}), 500
+        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 # --- ADMIN: DELETE USER ---
 @app.route('/admin/delete-user', methods=['DELETE'])

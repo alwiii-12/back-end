@@ -120,6 +120,15 @@ db = firestore.client()
 # Defined once here for consistency
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
+# Define tolerance values based on category
+TOLERANCE_SETTINGS = {
+    "Output": {"within": 1.8, "warning": 2.0, "out": 2.0},
+    "Flatness": {"within": 0.9, "warning": 1.0, "out": 1.0},
+    "Inline Symmetry": {"within": 0.9, "warning": 1.0, "out": 1.0},
+    "Crossline Symmetry": {"within": 0.9, "warning": 1.0, "out": 1.0},
+}
+
+
 # --- VERIFY ADMIN TOKEN ---
 # Changed to synchronous function as discussed, given Gunicorn WSGI server
 def verify_admin_token(id_token):
@@ -225,6 +234,7 @@ def save_data():
         uid = content.get("uid")
         month_param = content.get("month")
         raw_data = content.get("data")
+        category = content.get("category", "Output") # NEW: Get category, default to Output
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
@@ -239,18 +249,15 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'Missing centerId'}), 400
         if not isinstance(raw_data, list):
             return jsonify({'status': 'error', 'message': 'Invalid data'}), 400
+        if category not in TOLERANCE_SETTINGS: # Validate category
+            return jsonify({'status': 'error', 'message': 'Invalid data category provided'}), 400
+
 
         month_doc_id = f"Month_{month_param}"
         converted = [{"row": i, "energy": row[0], "values": row[1:]} for i, row in enumerate(raw_data) if len(row) > 1]
         
-        # Before saving, get current data from DB to determine what's "new"
-        existing_doc = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id).get()
-        existing_data_map = {}
-        if existing_doc.exists:
-            for row in existing_doc.to_dict().get("data", []):
-                existing_data_map[row.get("energy")] = row.get("values", [])
-
-        db.collection("linac_data").document(center_id).collection("months").document(month_doc_id).set(
+        # Store data under a sub-collection for the category
+        db.collection("linac_data").document(center_id).collection(category).document(month_doc_id).set(
             {"data": converted}, merge=True)
         
         # --- Anomaly Detection on newly changed or added data points (PLACEHOLDER) ---
@@ -272,8 +279,12 @@ def get_data():
     try:
         month_param = request.args.get('month')
         uid = request.args.get('uid')
+        category = request.args.get("category", "Output") # NEW: Get category, default to Output
+
         if not month_param or not uid:
             return jsonify({'error': 'Missing "month" or "uid"'}), 400
+        if category not in TOLERANCE_SETTINGS: # Validate category
+            return jsonify({'status': 'error', 'message': 'Invalid data category provided'}), 400
 
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
@@ -291,7 +302,8 @@ def get_data():
         _, num_days = monthrange(year, mon)
         energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
 
-        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+        # Load data from the specific category sub-collection
+        doc = db.collection("linac_data").document(center_id).collection(category).document(f"Month_{month_param}").get()
         if doc.exists:
             for row in doc.to_dict().get("data", []):
                 energy, values = row.get("energy"), row.get("values", [])
@@ -316,12 +328,15 @@ def send_alert():
         hospital = content.get("hospitalName", "Unknown")
         uid = content.get("uid")
         month_key = content.get("month")
+        category = content.get("category", "Output") # NEW: Get category, default to Output
 
         if not uid or not month_key:
             app.logger.warning("Missing UID or month key for alert processing.")
             if sentry_sdk_configured:
                 sentry_sdk.capture_message("Missing UID or month key for alert processing.", level="warning")
             return jsonify({'status': 'error', 'message': 'Missing UID or month for alert processing'}), 400
+        if category not in TOLERANCE_SETTINGS: # Validate category
+            return jsonify({'status': 'error', 'message': 'Invalid data category provided'}), 400
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
@@ -364,7 +379,8 @@ def send_alert():
                 sentry_sdk.capture_message("APP_PASSWORD not configured. Cannot send alert email.", level="warning")
             return jsonify({'status': 'email_credentials_missing', 'message': 'Email credentials missing'}), 500
 
-        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}")
+        # Store alert state under category specific sub-collection
+        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection(category).document(f"Month_{month_key}")
         app.logger.debug(f"Firestore alerts path: {month_alerts_doc_ref.path}")
 
         alerts_doc_snap = month_alerts_doc_ref.get()
@@ -388,25 +404,25 @@ def send_alert():
             app.logger.info("No change in out-of-tolerance values since last alert. Email will not be sent.")
             return jsonify({'status': 'no_change', 'message': 'No new alerts or changes to existing issues. Email not sent.'})
 
-        message_body = f"LINAC QA Status Update for {hospital} ({month_key})\n\n"
+        message_body = f"LINAC QA Status Update for {hospital} ({month_key}) - Category: {category}\n\n" # NEW: Add category to email subject
 
         if current_out_values:
-            message_body += "Current Out-of-Tolerance Values (±2.0%) or persisting issues:\n\n"
+            message_body += f"Current Out-of-Tolerance Values for {category} (refer to tolerance settings for this category):\n\n" # Adjusted message
             sorted_current_out_values = sorted(current_out_values, key=lambda x: (x.get('energy'), x.get('date')))
             for v in sorted_current_out_values:
                 formatted_date = v.get('date', 'N/A')
                 message_body += f"Energy: {v.get('energy', 'N/A')}, Date: {formatted_date}, Value: {v.get('value', 'N/A')}%\n"
             message_body += "\n"
         elif previously_alerted:
-            message_body += "All previously detected LINAC QA issues for this month are now resolved.\n"
+            message_body += f"All previously detected LINAC QA issues for {category} this month are now resolved.\n" # Adjusted message
         else:
-            message_body += "All LINAC QA values are currently within tolerance for this month.\n"
+            message_body += f"All LINAC QA values for {category} are currently within tolerance for this month.\n" # Adjusted message
         
-        email_sent = send_notification_email(", ".join(rso_emails), f"⚠ LINAC QA Status - {hospital} ({month_key})", message_body)
+        email_sent = send_notification_email(", ".join(rso_emails), f"⚠ LINAC QA Status - {hospital} ({month_key}) - {category}", message_body) # NEW: Add category to email subject
 
         if email_sent:
             month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
-            app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}.")
+            app.logger.debug(f"Alert state updated in Firestore for {center_id}/{month_key}/{category}.")
             return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
         else:
             app.logger.error("Failed to send alert email via helper function.")
@@ -428,6 +444,7 @@ def query_qa_data():
         user_query_text = content.get("query_text", "") # Get the full text query from frontend
         month_param = content.get("month")
         uid = content.get("uid")
+        category = content.get("category", "Output") # NEW: Get category, default to Output
         
         # Parameters that can be extracted by NLP or provided as fallback
         energy_type = content.get("energy_type") 
@@ -435,6 +452,9 @@ def query_qa_data():
 
         if not user_query_text or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query text, month, or UID'}), 400
+        if category not in TOLERANCE_SETTINGS: # Validate category
+            return jsonify({'status': 'error', 'message': 'Invalid data category provided'}), 400
+
 
         # --- NEW: Check if NLP model is loaded first ---
         if nlp is None:
@@ -513,7 +533,7 @@ def query_qa_data():
                         try:
                             # Try parsing various common date formats directly from the entity text
                             parsed_date = None
-                            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"): # More formats for robustness
+                            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %b %Y"): # More formats for robustness
                                 try:
                                     parsed_date = datetime.strptime(ent.text, fmt)
                                     break
@@ -567,15 +587,21 @@ def query_qa_data():
         if not center_id:
             return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
 
-        # Helper to fetch current month's data
-        def get_current_month_qa_data(c_id, m_param):
-            doc = db.collection("linac_data").document(c_id).collection("months").document(f"Month_{m_param}").get()
+        # Helper to fetch current month's data based on category
+        def get_current_month_qa_data(c_id, m_param, cat):
+            doc = db.collection("linac_data").document(c_id).collection(cat).document(f"Month_{m_param}").get()
             data_rows = []
             if doc.exists:
                 data_rows = doc.to_dict().get("data", [])
             return data_rows
         
-        data_rows_current_month = get_current_month_qa_data(center_id, month_param)
+        data_rows_current_month = get_current_month_qa_data(center_id, month_param, category) # NEW: Pass category
+
+        # Get tolerance settings for the current category
+        tolerance_within = TOLERANCE_SETTINGS[category]["within"]
+        tolerance_warning = TOLERANCE_SETTINGS[category]["warning"]
+        tolerance_out = TOLERANCE_SETTINGS[category]["out"]
+
 
         # --- Query Logic (Expanded) ---
         if query_type == "out_of_tolerance_dates":
@@ -589,7 +615,7 @@ def query_qa_data():
                 for i, value in enumerate(values):
                     try:
                         n = float(value)
-                        if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
+                        if abs(n) > tolerance_out: # Check against category-specific 'out' tolerance
                                 if i < len(date_strings):
                                     out_dates.add(date_strings[i])
                     except (ValueError, TypeError):
@@ -597,7 +623,7 @@ def query_qa_data():
             
             sorted_out_dates = sorted(list(out_dates))
 
-            return jsonify({'status': 'success', 'message': "The following dates had data beyond tolerance levels: " + (", ".join(sorted_out_dates) if sorted_out_dates else "None.")}), 200
+            return jsonify({'status': 'success', 'message': f"The following dates had data beyond tolerance levels for {category}: " + (", ".join(sorted_out_dates) if sorted_out_dates else "None.")}), 200
 
         elif query_type == "value_on_date":
             if not energy_type or not date_param:
@@ -627,9 +653,9 @@ def query_qa_data():
                         found_value = values[day_index]
                         try:
                             n = float(found_value)
-                            if abs(n) <= 1.8:
+                            if abs(n) <= tolerance_within: # Check against category-specific 'within' tolerance
                                 found_status = "Within Tolerance"
-                            elif abs(n) <= 2.0:
+                            elif abs(n) <= tolerance_warning: # Check against category-specific 'warning' tolerance
                                 found_status = "Warning"
                             else:
                                 found_status = "Out of Tolerance"
@@ -644,10 +670,10 @@ def query_qa_data():
                     'energy_type': energy_type,
                     'date': date_param,
                     'data_status': found_status, # Use data_status to avoid conflict with 'status'
-                    'message': f"For {energy_type} on {date_param}: Value is {found_value}% (Status: {found_status})."
+                    'message': f"For {energy_type} on {date_param} in {category}: Value is {found_value}% (Status: {found_status})."
                 }), 200
             else:
-                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
+                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param} in {category}."}), 200
 
         elif query_type == "energy_data_for_month":
             if not energy_type:
@@ -671,11 +697,11 @@ def query_qa_data():
                         formatted_data.append({"date": dates[i], "value": val}) # Return structured data
                 
                 if formatted_data:
-                    return jsonify({'status': 'success', 'data': formatted_data, 'message': f"Here is the data for {energy_type} this month."}), 200
+                    return jsonify({'status': 'success', 'data': formatted_data, 'message': f"Here is the data for {energy_type} in {category} this month."}), 200
                 else:
-                    return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month."}), 200
+                    return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} in {category} this month."}), 200
             else:
-                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} this month."}), 200
+                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} in {category} this month."}), 200
 
         elif query_type == "warning_values_for_month":
             year, mon = map(int, month_param.split("-"))
@@ -689,7 +715,8 @@ def query_qa_data():
                 for i, value in enumerate(values):
                     try:
                         n = float(value)
-                        if abs(n) > 1.8 and abs(n) <= 2.0:
+                        # Check against category-specific 'within' and 'warning' tolerance
+                        if abs(n) > tolerance_within and abs(n) <= tolerance_warning: 
                             if i < len(date_strings):
                                 warning_entries.append({
                                     "energy": energy_type_row,
@@ -703,9 +730,9 @@ def query_qa_data():
 
             if sorted_warning_entries:
                 # Returning the structured data directly for frontend processing
-                return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries, 'message': "Warning values this month."}), 200
+                return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries, 'message': f"Warning values for {category} this month."}), 200
             else:
-                return jsonify({'status': 'success', 'message': "No warning values found this month. Great job!"}), 200
+                return jsonify({'status': 'success', 'message': f"No warning values found for {category} this month. Great job!"}), 200
 
         # --- NEW ANALYTICAL QUERIES ---
 
@@ -723,9 +750,9 @@ def query_qa_data():
                             pass
             if all_values:
                 avg = np.mean(all_values)
-                return jsonify({'status': 'success', 'message': f"The average deviation for {energy_type} this month is {avg:.2f}%."}), 200
+                return jsonify({'status': 'success', 'message': f"The average deviation for {energy_type} in {category} this month is {avg:.2f}%."}), 200
             else:
-                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to calculate average."}), 200
+                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} in {category} this month to calculate average."}), 200
         
         elif query_type == "max_value":
             if not energy_type:
@@ -747,9 +774,9 @@ def query_qa_data():
                         except (ValueError, TypeError):
                             pass
             if max_val != -float('inf'):
-                return jsonify({'status': 'success', 'message': f"The maximum value for {energy_type} this month was {max_val:.2f}% on {max_date}."}), 200
+                return jsonify({'status': 'success', 'message': f"The maximum value for {energy_type} in {category} this month was {max_val:.2f}% on {max_date}."}), 200
             else:
-                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find max value."}), 200
+                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} in {category} this month to find max value."}), 200
 
         elif query_type == "min_value":
             if not energy_type:
@@ -771,9 +798,9 @@ def query_qa_data():
                         except (ValueError, TypeError):
                             pass
             if min_val != float('inf'):
-                return jsonify({'status': 'success', 'message': f"The minimum value for {energy_type} this month was {min_val:.2f}% on {min_date}."}), 200
+                return jsonify({'status': 'success', 'message': f"The minimum value for {energy_type} in {category} this month was {min_val:.2f}% on {min_date}."}), 200
             else:
-                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find min value."}), 200
+                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} in {category} this month to find min value."}), 200
 
         elif query_type == "all_values_on_date":
             if not date_param:
@@ -796,9 +823,9 @@ def query_qa_data():
                         daily_data.append(f"{energy_type_row}: {val}%")
             
             if daily_data:
-                return jsonify({'status': 'success', 'message': f"Data for {date_param}: {'; '.join(daily_data)}."}), 200
+                return jsonify({'status': 'success', 'message': f"Data for {date_param} in {category}: {'; '.join(daily_data)}."}), 200
             else:
-                return jsonify({'status': 'success', 'message': f"No data found for {date_param}."}), 200
+                return jsonify({'status': 'success', 'message': f"No data found for {date_param} in {category}."}), 200
 
         elif query_type == "greeting":
             return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
@@ -1063,9 +1090,12 @@ def get_hospital_qa_data():
 
     hospital_id = request.args.get('hospitalId')
     month_param = request.args.get('month')
+    category = request.args.get("category", "Output") # NEW: Get category, default to Output
 
     if not hospital_id or not month_param:
         return jsonify({'message': 'Missing hospitalId or month parameter'}), 400
+    if category not in TOLERANCE_SETTINGS: # Validate category
+        return jsonify({'status': 'error', 'message': 'Invalid data category provided'}), 400
 
     try:
         year, mon = map(int, month_param.split("-"))
@@ -1073,7 +1103,8 @@ def get_hospital_qa_data():
 
         results_data = {energy: [''] * num_days for energy in ENERGY_TYPES}
 
-        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
+        # Load data from the specific category sub-collection
+        doc_ref = db.collection("linac_data").document(hospital_id).collection(category).document(f"Month_{month_param}")
         doc_snap = doc_ref.get()
 
         if doc_snap.exists:
@@ -1148,7 +1179,7 @@ def get_audit_logs():
                 
                 if utc_dt:
                     # Convert UTC datetime to IST
-                    ist_dt = utc_dt.astimezone(ist_timezone) # THIS LINE WAS ADDED TO FIX THE NameError AND HAS BEEN RE-ADDED
+                    ist_dt = utc_dt.astimezone(ist_timezone) 
                     # Format to DD/MM/YYYY, HH:MM:SS AM/PM - This is the format seen in your screenshot
                     log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
                 else:
@@ -1177,9 +1208,13 @@ def export_excel():
         content = request.get_json(force=True)
         uid = content.get("uid")
         month_param = content.get("month")
+        category = content.get("category", "Output") # NEW: Get category, default to Output
+
 
         if not uid or not month_param:
             return jsonify({'error': 'Missing UID or month parameter'}), 400
+        if category not in TOLERANCE_SETTINGS: # Validate category
+            return jsonify({'status': 'error', 'message': 'Invalid data category provided'}), 400
 
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
@@ -1197,7 +1232,8 @@ def export_excel():
         _, num_days = monthrange(year, mon)
         energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
 
-        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+        # Load data from the specific category sub-collection
+        doc = db.collection("linac_data").document(center_id).collection(category).document(f"Month_{month_param}").get()
         if doc.exists:
             for row in doc.to_dict().get("data", []):
                 energy, values = row.get("energy"), row.get("values", [])
@@ -1217,13 +1253,13 @@ def export_excel():
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='LINAC QA Data')
+            df.to_excel(writer, index=False, sheet_name=f'{category} QA Data') # NEW: Sheet name includes category
         output.seek(0)
 
         return send_file(
             output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            download_name=f'LINAC_QA_Data_{month_param}.xlsx',
+            download_name=f'LINAC_QA_Data_{category}_{month_param}.xlsx', # NEW: Filename includes category
             as_attachment=True
         )
 

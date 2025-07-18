@@ -758,7 +758,7 @@ def get_hospital_qa_data():
 # --- ADMIN: GET AUDIT LOGS ---
 @app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
 def get_audit_logs():
-    if request.method == 'OPTIONS': # Handle CORS preflight explicitly
+    if request.method == 'OPTIONS':
         return '', 200
 
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -767,72 +767,63 @@ def get_audit_logs():
         return jsonify({'message': 'Unauthorized'}), 403
 
     hospital_filter = request.args.get('hospitalId')
-    date_filter_str = request.args.get('date') # Single date filter
+    date_filter_str = request.args.get('date')
     action_filter = request.args.get('action')
 
     try:
         logs_query = db.collection("audit_logs")
 
+        # Define timezones
+        user_timezone = pytz.timezone('Asia/Kolkata')
+        utc_timezone = pytz.utc
+
+        if date_filter_str:
+            # Create a "naive" datetime object from the date string
+            start_of_day_naive = datetime.strptime(date_filter_str, "%Y-%m-%d")
+            
+            # Localize it to the user's timezone
+            start_of_day_local = user_timezone.localize(start_of_day_naive)
+            
+            # Define the end of that day
+            end_of_day_local = start_of_day_local + timedelta(days=1)
+            
+            # Convert the local start and end times to UTC for the query
+            start_of_day_utc = start_of_day_local.astimezone(utc_timezone)
+            end_of_day_utc = end_of_day_local.astimezone(utc_timezone)
+            
+            logs_query = logs_query.where('timestamp', '>=', start_of_day_utc)
+            logs_query = logs_query.where('timestamp', '<', end_of_day_utc)
+
         if hospital_filter:
             logs_query = logs_query.where('hospital', '==', hospital_filter)
         if action_filter:
             logs_query = logs_query.where('action', '==', action_filter)
-        if date_filter_str:
-            # Filter for a specific day (start of day to end of day)
-            start_of_day = datetime.strptime(date_filter_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0)
-            end_of_day = start_of_day + timedelta(days=1) - timedelta(microseconds=1)
-            
-            logs_query = logs_query.where('timestamp', '>=', start_of_day)
-            logs_query = logs_query.where('timestamp', '<=', end_of_day)
 
-        logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING) # Latest first
+        # Firestore requires the first orderBy field to match the inequality field if one exists
+        logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING)
 
         logs_stream = logs_query.stream()
         all_logs = []
-        # Define IST timezone object
-        ist_timezone = pytz.timezone('Asia/Kolkata') # Indian Standard Time is UTC+5:30
 
         for doc in logs_stream:
             log_data = doc.to_dict()
-            # Convert Firestore Timestamp to string for JSON serialization
             if 'timestamp' in log_data and log_data['timestamp'] is not None:
-                # Ensure it's a Firestore Timestamp object from Firestore and convert to datetime
-                if hasattr(log_data['timestamp'], 'astimezone'): 
-                    # If it's a Firestore Timestamp object, convert it to a timezone-aware UTC datetime
-                    utc_dt = log_data['timestamp'].astimezone(pytz.utc) 
-                elif isinstance(log_data['timestamp'], datetime): 
-                    # If it's already a naive datetime, assume UTC and make it timezone-aware
-                    utc_dt = log_data['timestamp'].replace(tzinfo=pytz.utc)
-                else: 
-                    utc_dt = None # Or handle more robustly if other types are expected
-                
-                if utc_dt:
-                    # Convert UTC datetime to IST
-                    ist_dt = utc_dt.astimezone(ist_timezone) # THIS LINE WAS ADDED TO FIX THE NameError AND HAS BEEN RE-ADDED
-                    # Format to DD/MM/YYYY, HH:MM:SS AM/PM - This is the format seen in your screenshot
-                    log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p") 
-                else:
-                    log_data['timestamp'] = 'Invalid Date/Time' # Indicate issue if conversion fails
+                utc_dt = log_data['timestamp'].astimezone(utc_timezone)
+                ist_dt = utc_dt.astimezone(user_timezone)
+                log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p")
             else:
-                log_data['timestamp'] = 'No Timestamp' # If timestamp field is missing or None
+                log_data['timestamp'] = 'No Timestamp'
             
-            # Simplified user info for display
             if 'targetUserName' in log_data:
                 log_data['user_display'] = f"{log_data['targetUserName']} ({log_data.get('targetUserEmail', 'N/A')})"
             elif 'userEmail' in log_data:
                 log_data['user_display'] = log_data['userEmail']
             else:
                 log_data['user_display'] = 'N/A'
-
             all_logs.append(log_data)
 
         return jsonify({'status': 'success', 'logs': all_logs}), 200
 
-    except ValueError:
-        app.logger.error(f"Invalid date format for audit logs: {date_filter_str}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_message(f"Invalid date format for audit logs: {date_filter_str}", level="warning")
-        return jsonify({'message': 'Invalid date format for audit logs. Please use YYYY-MM-DD.'}), 400
     except Exception as e:
         app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
         if sentry_sdk_configured:

@@ -709,7 +709,7 @@ def delete_user():
 # --- ADMIN: GET HOSPITAL QA DATA ---
 @app.route('/admin/hospital-data', methods=['GET', 'OPTIONS'])
 def get_hospital_qa_data():
-    if request.method == 'OPTIONS': # Handle CORS preflight explicitly if needed
+    if request.method == 'OPTIONS':
         return '', 200
 
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -727,41 +727,33 @@ def get_hospital_qa_data():
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
 
-        results_data = {energy: [''] * num_days for energy in ENERGY_TYPES}
-
         doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
         doc_snap = doc_ref.get()
 
-        if doc_snap.exists:
-            firestore_data = doc_snap.to_dict()
-            final_table_data = {}
-            for data_type in DATA_TYPES:
-                field_name = f"data_{data_type}"
-                # Initialize empty structure for each data type
-                energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
-                # Check if the data type field exists in the document
-                if field_name in firestore_data:
-                    for row in firestore_data[field_name]:
-                        energy = row.get("energy")
-                        values = row.get("values", [])
-                        if energy in energy_dict:
-                            energy_dict[energy] = (values + [''] * num_days)[:num_days]
-                # Store the processed table for this data type
-                final_table_data[data_type] = [[e] + energy_dict[e] for e in ENERGY_TYPES]
-        else:
-             # If doc doesn't exist, create empty tables for all data types
-             final_table_data = {}
-             for data_type in DATA_TYPES:
-                 energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
-                 final_table_data[data_type] = [[e] + energy_dict[e] for e in ENERGY_TYPES]
+        all_data_tables = {}
+        
+        firestore_data = doc_snap.to_dict() if doc_snap.exists else {}
 
+        for data_type in DATA_TYPES:
+            field_name = f"data_{data_type}"
+            energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+            
+            if field_name in firestore_data:
+                for row in firestore_data[field_name]:
+                    energy = row.get("energy")
+                    values = row.get("values", [])
+                    if energy in energy_dict:
+                        energy_dict[energy] = (values + [""] * num_days)[:num_days]
+            
+            all_data_tables[data_type] = [[e] + energy_dict[e] for e in ENERGY_TYPES]
 
-        return jsonify({'status': 'success', 'data': final_table_data}), 200
+        return jsonify({'status': 'success', 'data': all_data_tables}), 200
     except Exception as e:
         app.logger.error(f"Error fetching hospital QA data for admin: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e) # Capture get data errors
+            sentry_sdk.capture_exception(e)
         return jsonify({'error': f"Failed to fetch data: {str(e)}"}), 500
+
 
 # --- ADMIN: GET AUDIT LOGS ---
 @app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
@@ -823,6 +815,15 @@ def get_audit_logs():
                     log_data['timestamp'] = 'Invalid Date/Time' # Indicate issue if conversion fails
             else:
                 log_data['timestamp'] = 'No Timestamp' # If timestamp field is missing or None
+            
+            # Simplified user info for display
+            if 'targetUserName' in log_data:
+                log_data['user_display'] = f"{log_data['targetUserName']} ({log_data.get('targetUserEmail', 'N/A')})"
+            elif 'userEmail' in log_data:
+                log_data['user_display'] = log_data['userEmail']
+            else:
+                log_data['user_display'] = 'N/A'
+
             all_logs.append(log_data)
 
         return jsonify({'status': 'success', 'logs': all_logs}), 200

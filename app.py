@@ -776,22 +776,14 @@ def get_audit_logs():
 
     try:
         logs_query = db.collection("audit_logs")
-
-        # Define timezones
+        
         user_timezone = pytz.timezone('Asia/Kolkata')
         utc_timezone = pytz.utc
 
         if date_filter_str:
-            # Create a "naive" datetime object from the date string
             start_of_day_naive = datetime.strptime(date_filter_str, "%Y-%m-%d")
-            
-            # Localize it to the user's timezone
             start_of_day_local = user_timezone.localize(start_of_day_naive)
-            
-            # Define the end of that day
             end_of_day_local = start_of_day_local + timedelta(days=1)
-            
-            # Convert the local start and end times to UTC for the query
             start_of_day_utc = start_of_day_local.astimezone(utc_timezone)
             end_of_day_utc = end_of_day_local.astimezone(utc_timezone)
             
@@ -803,13 +795,10 @@ def get_audit_logs():
         if action_filter:
             logs_query = logs_query.where('action', '==', action_filter)
 
-        # Firestore requires the first orderBy field to match the inequality field if one exists
         logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING)
-
-        logs_stream = logs_query.stream()
+        
         all_logs = []
-
-        for doc in logs_stream:
+        for doc in logs_query.stream():
             log_data = doc.to_dict()
             if 'timestamp' in log_data and log_data['timestamp'] is not None:
                 utc_dt = log_data['timestamp'].astimezone(utc_timezone)
@@ -827,13 +816,11 @@ def get_audit_logs():
             all_logs.append(log_data)
 
         return jsonify({'status': 'success', 'logs': all_logs}), 200
-
     except Exception as e:
         app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to fetch audit logs: {str(e)}"}), 500
-
 
 # --- Excel Export Endpoint ---
 @app.route('/export-excel', methods=['POST'])

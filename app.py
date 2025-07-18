@@ -62,7 +62,11 @@ app = Flask(__name__)
 # IMPORTANT: Replace 'https://front-endnew.onrender.com' with your actual deployed frontend URL.
 # For development, you might use "http://localhost:XXXX" or origins="*".
 # For production, specify your exact frontend domain(s).
-CORS(app, resources={r"/*": {"origins": "https://front-endnew.onrender.com"}})
+# --- [CORS CONFIGURATION] ---
+origins = [
+    "https://front-endnew.onrender.com"
+]
+CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
 

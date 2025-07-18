@@ -121,6 +121,13 @@ db = firestore.client()
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 # NEW: Define data types
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
+# NEW: Backend config for tolerances, mirroring the frontend
+DATA_TYPE_CONFIGS = {
+    "output": {"warning": 1.8, "tolerance": 2.0},
+    "flatness": {"warning": 0.9, "tolerance": 1.0},
+    "inline": {"warning": 0.9, "tolerance": 1.0},
+    "crossline": {"warning": 0.9, "tolerance": 1.0}
+}
 
 
 # --- VERIFY ADMIN TOKEN ---
@@ -392,402 +399,78 @@ def send_alert():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-# --- NEW: Chatbot Query Endpoint (LOGIC UNCHANGED FOR NOW) ---
+# --- UPGRADED: Chatbot Query Endpoint ---
 @app.route('/query-qa-data', methods=['POST'])
 def query_qa_data():
     try:
         content = request.get_json(force=True)
-        user_query_text = content.get("query_text", "") # Get the full text query from frontend
+        user_query_text = content.get("query_text", "")
         month_param = content.get("month")
         uid = content.get("uid")
-        
-        # Parameters that can be extracted by NLP or provided as fallback
-        energy_type = content.get("energy_type") 
-        date_param = content.get("date")
+        # NEW: Get the data type context from the frontend
+        data_type_context = content.get("dataType", "output")
 
         if not user_query_text or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query text, month, or UID'}), 400
 
-        # --- NEW: Check if NLP model is loaded first ---
-        if nlp is None:
-            # Fallback to simple keyword matching if NLP model isn't available
-            lower_case_query = user_query_text.lower()
-            if "out of tolerance dates" in lower_case_query:
-                query_type = "out_of_tolerance_dates"
-            elif "warning values" in lower_case_query:
-                query_type = "warning_values_for_month"
-            elif "average deviation" in lower_case_query and any(e.lower().replace(" ", "") in lower_case_query.replace(" ", "") for e in ENERGY_TYPES):
-                query_type = "average_deviation"
-                for e_type in ENERGY_TYPES: # Basic extraction without full NLP
-                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
-                        energy_type = e_type
-                        break
-            elif "max value" in lower_case_query or "highest value" in lower_case_query:
-                query_type = "max_value"
-                for e_type in ENERGY_TYPES:
-                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
-                        energy_type = e_type
-                        break
-            elif "min value" in lower_case_query or "lowest value" in lower_case_query:
-                query_type = "min_value"
-                for e_type in ENERGY_TYPES:
-                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
-                        energy_type = e_type
-                        break
-            elif "all values for" in lower_case_query or "all energies on" in lower_case_query:
-                query_type = "all_values_on_date"
-                date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
-                if date_match_regex: date_param = date_match_regex.group(1)
-            elif "value for" in lower_case_query or "status for" in lower_case_query:
-                query_type = "value_on_date"
-                for e_type in ENERGY_TYPES:
-                    if e_type.lower().replace(" ", "") in lower_case_query.replace(" ", ""):
-                        energy_type = e_type
-                        break
-                date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
-                if date_match_regex: date_param = date_match_regex.group(1)
-            elif "hi" in lower_case_query or "hello" in lower_case_query or "hey" in lower_case_query:
-                query_type = "greeting"
-            elif "how are you" in lower_case_query:
-                query_type = "how_are_you"
-            elif "thank you" in lower_case_query or "thanks" in lower_case_query:
-                query_type = "thank_you"
-            else:
-                return jsonify({'status': 'error', 'message': 'Chatbot is currently in limited mode. Please use exact phrases like "Out of tolerance dates", "Value for 6X on 2025-07-10", "Average deviation for 6X this month", or "List all warning values".'}), 503
-            
-            # If a query type was determined via fallback, but missing parameters, let specific query handle error
-            # If no query type was determined, then it returns the error above
-        else:
-            # Full NLP processing
-            doc = nlp(user_query_text.lower())
-            
-            # Attempt to extract energy type from tokens/entities
-            if not energy_type:
-                # Prioritize a custom entity if you had one, otherwise go for known energy type strings
-                found_energy_in_nlp = False
-                for ent in doc.ents: # If you train a custom 'ENERGY' entity
-                    if ent.label_ == "ENERGY":
-                        extracted_energy = ent.text.upper().replace(" ", "")
-                        if extracted_energy in [e.replace(" ", "") for e in ENERGY_TYPES]:
-                            energy_type = extracted_energy
-                            found_energy_in_nlp = True
-                            break
-                if not found_energy_in_nlp: # Fallback to keyword matching if no explicit entity
-                    for e_type in ENERGY_TYPES:
-                        # Use direct string check as spacy doesn't always make named entities for specific codes like '6X'
-                        if e_type.lower().replace(" ", "") in user_query_text.lower().replace(" ", ""):
-                            energy_type = e_type
-                            break
-
-            if not date_param:
-                for ent in doc.ents:
-                    if ent.label_ == "DATE":
-                        try:
-                            # Try parsing various common date formats directly from the entity text
-                            parsed_date = None
-                            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"): # More formats for robustness
-                                try:
-                                    parsed_date = datetime.strptime(ent.text, fmt)
-                                    break
-                                except ValueError:
-                                    pass
-                            if parsed_date:
-                                date_param = parsed_date.strftime("%Y-%m-%d")
-                                break # Found a date, break entity loop
-                        except Exception:
-                            pass
-                # Fallback to regex if NLP entity or initial parsing failed to be safe
-                if not date_param:
-                    date_match_regex = re.search(r'(\d{4}-\d{2}-\d{2})', user_query_text)
-                    if date_match_regex:
-                        date_param = date_match_regex.group(1)
-
-
-            # Determine query type based on keywords and extracted entities
-            if "out of tolerance dates" in user_query_text.lower() or "out of spec dates" in user_query_text.lower():
-                query_type = "out_of_tolerance_dates"
-            elif ("value for" in user_query_text.lower() or "status for" in user_query_text.lower()) and energy_type and date_param:
-                query_type = "value_on_date"
-            elif ("show all" in user_query_text.lower() or "all data" in user_query_text.lower()) and energy_type:
-                query_type = "energy_data_for_month"
-            elif "warning values" in lower_case_query or "warnings for" in lower_case_query:
-                query_type = "warning_values_for_month"
-            elif "average deviation" in lower_case_query:
-                query_type = "average_deviation"
-            elif "max value" in lower_case_query or "highest value" in lower_case_query:
-                query_type = "max_value"
-            elif "min value" in lower_case_query or "lowest value" in lower_case_query:
-                query_type = "min_value"
-            elif ("all values for" in user_query_text.lower() or "all energies on" in user_query_text.lower()) and date_param:
-                query_type = "all_values_on_date"
-            elif "hi" in user_query_text.lower() or "hello" in user_query_text.lower() or "hey" in user_query_text.lower():
-                query_type = "greeting"
-            elif "how are you" in lower_case_query:
-                query_type = "how_are_you"
-            elif "thank you" in lower_case_query or "thanks" in lower_case_query:
-                query_type = "thank_you"
-            else:
-                query_type = "unknown"
-
-
         user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        user_data = user_doc.to_dict()
-        center_id = user_data.get("centerId")
-
-        if not center_id:
-            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
-
-        # Helper to fetch current month's data
-        def get_current_month_qa_data(c_id, m_param):
-            doc = db.collection("linac_data").document(c_id).collection("months").document(f"Month_{m_param}").get()
-            data_rows = []
-            if doc.exists:
-                # NOTE: This only fetches 'output' data. Chatbot upgrade needed for other types.
-                data_rows = doc.to_dict().get("data_output", [])
-            return data_rows
+        if not user_doc.exists: return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+        if not center_id: return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
         
-        data_rows_current_month = get_current_month_qa_data(center_id, month_param)
+        # --- NEW: Dynamic Query Processing ---
+        lower_case_query = user_query_text.lower()
+        
+        # Determine data type from query, or use context
+        query_data_type = data_type_context
+        if 'flatness' in lower_case_query: query_data_type = 'flatness'
+        elif 'inline' in lower_case_query: query_data_type = 'inline'
+        elif 'crossline' in lower_case_query: query_data_type = 'crossline'
+        elif 'output' in lower_case_query: query_data_type = 'output'
+        
+        config = DATA_TYPE_CONFIGS[query_data_type]
+        warning_threshold = config["warning"]
+        tolerance_threshold = config["tolerance"]
 
-        # --- Query Logic (Expanded) ---
-        if query_type == "out_of_tolerance_dates":
-            year, mon = map(int, month_param.split("-"))
-            _, num_days = monthrange(year, mon)
-            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-            
+        # Fetch the correct data based on query_data_type
+        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
+        data_rows = doc.to_dict().get(f"data_{query_data_type}", []) if doc.exists else []
+
+        year, mon = map(int, month_param.split("-"))
+        date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
+        
+        # --- Simplified Query Logic ---
+        if "out of tolerance" in lower_case_query:
             out_dates = set()
-            for row in data_rows_current_month:
-                values = row.get("values", [])
-                for i, value in enumerate(values):
+            for row in data_rows:
+                for i, value in enumerate(row.get("values", [])):
                     try:
-                        n = float(value)
-                        if abs(n) > 2.0: # Greater than 2.0% implies 'out of tolerance'
-                                if i < len(date_strings):
-                                    out_dates.add(date_strings[i])
-                    except (ValueError, TypeError):
-                        pass
-            
-            sorted_out_dates = sorted(list(out_dates))
+                        if abs(float(value)) > tolerance_threshold: out_dates.add(date_strings[i])
+                    except (ValueError, TypeError): pass
+            msg = f"Out of tolerance dates for {query_data_type.title()}: {', '.join(sorted(list(out_dates))) if out_dates else 'None.'}"
+            return jsonify({'status': 'success', 'message': msg}), 200
 
-            return jsonify({'status': 'success', 'message': "The following dates had data beyond tolerance levels: " + (", ".join(sorted_out_dates) if sorted_out_dates else "None.")}), 200
-
-        elif query_type == "value_on_date":
-            if not energy_type or not date_param:
-                return jsonify({'status': 'error', 'message': 'I need both an energy type (e.g., 6X) and a specific date (e.g., 2025-07-10) to find a value. Make sure to specify energy and date clearly.'}), 400
-
-            try:
-                parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
-                if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
-                
-                day_index = parsed_date_obj.day - 1 # Convert day (1-based) to index (0-based)
-
-            except ValueError:
-                app.logger.error(f"Invalid date format in /query-qa-data: {date_param}", exc_info=True)
-                if sentry_sdk_configured:
-                    sentry_sdk.capture_message(f"Invalid date format in /query-qa-data: {date_param}", level="warning")
-                return jsonify({'status': 'error', 'message': 'Invalid date format for the date you provided. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
-
-
-            found_value = None
-            found_status = "N/A"
-
-            for row in data_rows_current_month:
-                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""): # Ensure matching cleaned energy types
-                    values = row.get("values", [])
-                    if day_index < len(values):
-                        found_value = values[day_index]
-                        try:
-                            n = float(found_value)
-                            if abs(n) <= 1.8:
-                                found_status = "Within Tolerance"
-                            elif abs(n) <= 2.0:
-                                found_status = "Warning"
-                            else:
-                                found_status = "Out of Tolerance"
-                        except (ValueError, TypeError):
-                            found_status = "Not a number"
-                    break
-            
-            if found_value is not None:
-                return jsonify({
-                    'status': 'success',
-                    'value': found_value, # Ensure these fields are returned as expected by frontend chatbot logic
-                    'energy_type': energy_type,
-                    'date': date_param,
-                    'data_status': found_status, # Use data_status to avoid conflict with 'status'
-                    'message': f"For {energy_type} on {date_param}: Value is {found_value}% (Status: {found_status})."
-                }), 200
-            else:
-                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} on {date_param}."}), 200
-
-        elif query_type == "energy_data_for_month":
-            if not energy_type:
-                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to list all data for this month.'}), 400
-
-            found_row = None
-            for row in data_rows_current_month:
-                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    found_row = row
-                    break
-            
-            if found_row:
-                year, mon = map(int, month_param.split("-"))
-                _, num_days = monthrange(year, mon)
-                dates = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-                
-                formatted_data = []
-                values = found_row.get("values", [])
-                for i, val in enumerate(values):
-                    if i < len(dates) and (val is not None and val != ''): # Only include actual data points
-                        formatted_data.append({"date": dates[i], "value": val}) # Return structured data
-                
-                if formatted_data:
-                    return jsonify({'status': 'success', 'data': formatted_data, 'message': f"Here is the data for {energy_type} this month."}), 200
-                else:
-                    return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month."}), 200
-            else:
-                return jsonify({'status': 'success', 'message': f"No data found for {energy_type} this month."}), 200
-
-        elif query_type == "warning_values_for_month":
-            year, mon = map(int, month_param.split("-"))
-            _, num_days = monthrange(year, mon)
-            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(num_days)]
-            
-            warning_entries = []
-            for row in data_rows_current_month:
-                energy_type_row = row.get("energy")
-                values = row.get("values", [])
-                for i, value in enumerate(values):
+        if "warning values" in lower_case_query:
+            warnings = []
+            for row in data_rows:
+                for i, value in enumerate(row.get("values", [])):
                     try:
-                        n = float(value)
-                        if abs(n) > 1.8 and abs(n) <= 2.0:
-                            if i < len(date_strings):
-                                warning_entries.append({
-                                    "energy": energy_type_row,
-                                    "date": date_strings[i],
-                                    "value": n
-                                })
-                    except (ValueError, TypeError):
-                        pass
-            
-            sorted_warning_entries = sorted(warning_entries, key=lambda x: (x['date'], x['energy']))
+                        val_float = float(value)
+                        if warning_threshold < abs(val_float) <= tolerance_threshold:
+                            warnings.append(f"{row.get('energy')} on {date_strings[i]}: {val_float}%")
+                    except (ValueError, TypeError): pass
+            msg = f"Warning values for {query_data_type.title()}: {'; '.join(warnings) if warnings else 'None.'}"
+            return jsonify({'status': 'success', 'message': msg}), 200
 
-            if sorted_warning_entries:
-                # Returning the structured data directly for frontend processing
-                return jsonify({'status': 'success', 'warning_entries': sorted_warning_entries, 'message': "Warning values this month."}), 200
-            else:
-                return jsonify({'status': 'success', 'message': "No warning values found this month. Great job!"}), 200
+        # Add more query handlers here as needed...
 
-        # --- NEW ANALYTICAL QUERIES ---
-
-        elif query_type == "average_deviation":
-            if not energy_type:
-                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to calculate the average deviation.'}), 400
-            all_values = []
-            for row in data_rows_current_month:
-                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for val in row.get("values", []):
-                        try:
-                            n = float(val)
-                            all_values.append(n)
-                        except (ValueError, TypeError):
-                            pass
-            if all_values:
-                avg = np.mean(all_values)
-                return jsonify({'status': 'success', 'message': f"The average deviation for {energy_type} this month is {avg:.2f}%."}), 200
-            else:
-                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to calculate average."}), 200
-        
-        elif query_type == "max_value":
-            if not energy_type:
-                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to find the maximum value.'}), 400
-            max_val = -float('inf')
-            max_date = "N/A"
-            year, mon = map(int, month_param.split("-"))
-            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
-            
-            for row in data_rows_current_month:
-                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for i, val in enumerate(row.get("values", [])):
-                        try:
-                            n = float(val)
-                            if n > max_val:
-                                max_val = n
-                                if i < len(date_strings):
-                                    max_date = date_strings[i]
-                        except (ValueError, TypeError):
-                            pass
-            if max_val != -float('inf'):
-                return jsonify({'status': 'success', 'message': f"The maximum value for {energy_type} this month was {max_val:.2f}% on {max_date}."}), 200
-            else:
-                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find max value."}), 200
-
-        elif query_type == "min_value":
-            if not energy_type:
-                return jsonify({'status': 'error', 'message': 'I need an energy type (e.g., 6X) to find the minimum value.'}), 400
-            min_val = float('inf')
-            min_date = "N/A"
-            year, mon = map(int, month_param.split("-"))
-            date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
-            
-            for row in data_rows_current_month:
-                if row.get("energy", "").replace(" ", "") == energy_type.replace(" ", ""):
-                    for i, val in enumerate(row.get("values", [])):
-                        try:
-                            n = float(val)
-                            if n < min_val:
-                                min_val = n
-                                if i < len(date_strings):
-                                    min_date = date_strings[i]
-                        except (ValueError, TypeError):
-                            pass
-            if min_val != float('inf'):
-                return jsonify({'status': 'success', 'message': f"The minimum value for {energy_type} this month was {min_val:.2f}% on {min_date}."}), 200
-            else:
-                return jsonify({'status': 'success', 'message': f"No numeric data found for {energy_type} this month to find min value."}), 200
-
-        elif query_type == "all_values_on_date":
-            if not date_param:
-                return jsonify({'status': 'error', 'message': 'I need a specific date (e.g., 2025-07-10) to list all values for it.'}), 400
-            try:
-                parsed_date_obj = datetime.strptime(date_param, "%Y-%m-%d")
-                if parsed_date_obj.year != int(month_param.split('-')[0]) or parsed_date_obj.month != int(month_param.split('-')[1]):
-                    return jsonify({'status': 'error', 'message': f'The date {date_param} does not match the current month {month_param}. Please ask for data within the current selected month.'}), 200
-                day_index = parsed_date_obj.day - 1 
-            except ValueError:
-                return jsonify({'status': 'error', 'message': 'Invalid date format. Please use YYYY-MM-DD (e.g., 2025-07-10).'}), 400
-
-            daily_data = []
-            for row in data_rows_current_month:
-                energy_type_row = row.get("energy")
-                values = row.get("values", [])
-                if day_index < len(values):
-                    val = values[day_index]
-                    if val != '':
-                        daily_data.append(f"{energy_type_row}: {val}%")
-            
-            if daily_data:
-                return jsonify({'status': 'success', 'message': f"Data for {date_param}: {'; '.join(daily_data)}."}), 200
-            else:
-                return jsonify({'status': 'success', 'message': f"No data found for {date_param}."}), 200
-
-        elif query_type == "greeting":
-            return jsonify({'status': 'success', 'message': "Hello there! How can I assist you with your QA data today?"}), 200
-        elif query_type == "how_are_you":
-            return jsonify({'status': 'success', 'message': "I'm just a bot, but I'm doing great! How can I help you manage your LINAC QA?"}), 200
-        elif query_type == "thank_you":
-            return jsonify({'status': 'success', 'message': "You're welcome! Happy to help."}), 200
-        else:
-            # Fallback for unrecognized queries
-            return jsonify({'status': 'error', 'message': 'I\'m sorry, I don\'t understand that request. Please try rephrasing or ask about:\n- "Out of tolerance dates"\n- "Value for 6X on 2025-07-10"\n- "All 6X data this month"\n- "List all warning values"\n- "Average deviation for 6X this month"\n- "Max/Min value for 10X FFF this month"\n- "All values for 2025-07-05".'}), 200
+        return jsonify({'status': 'error', 'message': f"I'm sorry, I can't answer that yet. Try asking about 'out of tolerance' or 'warning values' for {query_data_type.title()}."}), 501
 
     except Exception as e:
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
+        if sentry_sdk_configured: sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 # --- ADMIN: GET PENDING USERS ---
 @app.route('/admin/pending-users', methods=['GET'])

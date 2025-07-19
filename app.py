@@ -66,6 +66,10 @@ app = Flask(__name__)
 origins = [
     "https://front-endnew.onrender.com"
 ]
+# --- [CORS CONFIGURATION] ---
+origins = [
+    "https://front-endnew.onrender.com"
+]
 CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
@@ -340,7 +344,6 @@ def send_alert():
         hospital = content.get("hospitalName", "Unknown")
         uid = content.get("uid")
         month_key = content.get("month")
-        # NEW: Get dataType and tolerance info from request
         data_type = content.get("dataType", "output")
         tolerance_percent = content.get("tolerance", 2.0)
         
@@ -358,13 +361,44 @@ def send_alert():
         if not center_id:
             return jsonify({'status': 'error', 'message': 'Center ID not found for user'}), 400
 
-        rso_emails = [rso.to_dict()['email'] for rso in db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream() if 'email' in rso.to_dict()]
+        rso_users = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream()
+        rso_emails = [rso.to_dict()['email'] for rso in rso_users if 'email' in rso.to_dict()]
 
         if not rso_emails:
             return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200
 
         if not APP_PASSWORD:
             return jsonify({'status': 'email_credentials_missing', 'message': 'Email credentials missing'}), 500
+
+        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}_{data_type}")
+        alerts_doc_snap = month_alerts_doc_ref.get()
+        
+        previously_alerted = alerts_doc_snap.to_dict().get("alerted_values", []) if alerts_doc_snap.exists else []
+        previously_alerted_strings = set(json.dumps(val, sort_keys=True) for val in previously_alerted)
+        current_out_values_strings = set(json.dumps(val, sort_keys=True) for val in current_out_values)
+
+        if current_out_values_strings == previously_alerted_strings:
+            return jsonify({'status': 'no_change', 'message': 'No new alerts or changes. Email not sent.'})
+
+        message_body = f"{data_type_display} QA Status Update for {hospital} ({month_key})\n\n"
+        if current_out_values:
+            message_body += f"Current Out-of-Tolerance Values (±{tolerance_percent}%):\n\n"
+            for v in sorted(current_out_values, key=lambda x: (x.get('energy'), x.get('date'))):
+                message_body += f"Energy: {v.get('energy', 'N/A')}, Date: {v.get('date', 'N/A')}, Value: {v.get('value', 'N/A')}%\n"
+        else:
+            message_body += f"All previously detected {data_type_display} QA issues for this month are now resolved.\n"
+
+        email_sent = send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital} ({month_key})", message_body)
+
+        if email_sent:
+            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
+            return jsonify({'status': 'alert sent'}), 200
+        else:
+            return jsonify({'status': 'email_send_error', 'message': 'Failed to send email.'}), 500
+    except Exception as e:
+        app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
+        if SENTRY_DSN: sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
         # NEW: Alerts stored per data type
         month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}_{data_type}")
@@ -818,8 +852,7 @@ def get_audit_logs():
         return jsonify({'status': 'success', 'logs': all_logs}), 200
     except Exception as e:
         app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
+        if SENTRY_DSN: sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to fetch audit logs: {str(e)}"}), 500
 
 # --- Excel Export Endpoint ---

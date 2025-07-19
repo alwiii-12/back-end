@@ -70,6 +70,9 @@ origins = [
 origins = [
     "https://front-endnew.onrender.com"
 ]
+origins = [
+    "https://front-endnew.onrender.com"
+]
 CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
@@ -398,42 +401,6 @@ def send_alert():
     except Exception as e:
         app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
         if SENTRY_DSN: sentry_sdk.capture_exception(e)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-        # NEW: Alerts stored per data type
-        month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}_{data_type}")
-
-        alerts_doc_snap = month_alerts_doc_ref.get()
-        previously_alerted_strings = set()
-        if alerts_doc_snap.exists:
-            previously_alerted_strings = set(json.dumps(val, sort_keys=True) for val in alerts_doc_snap.to_dict().get("alerted_values", []))
-
-        current_out_values_strings = set(json.dumps(val, sort_keys=True) for val in current_out_values)
-
-        if current_out_values_strings == previously_alerted_strings:
-            return jsonify({'status': 'no_change', 'message': 'No new alerts or changes. Email not sent.'})
-
-        # NEW: Dynamic message body
-        message_body = f"{data_type_display} QA Status Update for {hospital} ({month_key})\n\n"
-        if current_out_values:
-            message_body += f"Current Out-of-Tolerance Values (±{tolerance_percent}%):\n\n"
-            for v in sorted(current_out_values, key=lambda x: (x.get('energy'), x.get('date'))):
-                message_body += f"Energy: {v.get('energy', 'N/A')}, Date: {v.get('date', 'N/A')}, Value: {v.get('value', 'N/A')}%\n"
-        else:
-            message_body += f"All previously detected {data_type_display} QA issues for this month are now resolved.\n"
-
-        email_sent = send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital} ({month_key})", message_body)
-
-        if email_sent:
-            month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
-            return jsonify({'status': 'alert sent', 'message': 'Email sent and alert state updated.'}), 200
-        else:
-            return jsonify({'status': 'email_send_error', 'message': 'Failed to send email.'}), 500
-
-    except Exception as e:
-        app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
@@ -927,7 +894,50 @@ def export_excel():
 
 
 # --- TEMPORARY DEBUGGING ROUTE FOR SENTRY - REMOVE AFTER TESTING ---
-@app.route("/debug-sentry")
+@app.route('/annotations', methods=['GET'])
+def get_annotations():
+    try:
+        month_param = request.args.get('month')
+        data_type = request.args.get('dataType')
+        uid = request.args.get('uid')
+        if not all([month_param, data_type, uid]): return jsonify({'error': 'Missing parameters'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists: return jsonify({'error': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+        if not center_id: return jsonify({'error': 'Missing centerId'}), 400
+
+        annotations_ref = db.collection("linac_annotations").document(center_id).collection("months").document(f"Month_{month_param}")
+        doc = annotations_ref.get()
+        if doc.exists:
+            all_annotations = doc.to_dict()
+            type_annotations = {k: v for k, v in all_annotations.items() if v.get('dataType') == data_type}
+            return jsonify(type_annotations), 200
+        else:
+            return jsonify({}), 200
+    except Exception as e:
+        app.logger.error(f"Get annotations failed: {str(e)}", exc_info=True)
+        if SENTRY_DSN: sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/save-annotation', methods=['POST'])
+def save_annotation():
+    try:
+        content = request.get_json(force=True)
+        uid, month_param, key, data = content.get("uid"), content.get("month"), content.get("key"), content.get("data")
+        if not all([uid, month_param, key, data]): return jsonify({'status': 'error', 'message': 'Missing data'}), 400
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists: return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+        if not center_id: return jsonify({'status': 'error', 'message': 'Missing centerId'}), 400
+
+        doc_ref = db.collection("linac_annotations").document(center_id).collection("months").document(f"Month_{month_param}")
+        doc_ref.set({key: data}, merge=True)
+        return jsonify({'status': 'success'}), 200
+    except Exception as e:
+        app.logger.error(f"Save annotation failed: {str(e)}", exc_info=True)
+        if SENTRY_DSN: sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500@app.route("/debug-sentry")
 def trigger_error():
     division_by_zero = 1 / 0
     return "Hello, world!"

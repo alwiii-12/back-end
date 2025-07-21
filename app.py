@@ -66,13 +66,6 @@ app = Flask(__name__)
 origins = [
     "https://front-endnew.onrender.com"
 ]
-# --- [CORS CONFIGURATION] ---
-origins = [
-    "https://front-endnew.onrender.com"
-]
-origins = [
-    "https://front-endnew.onrender.com"
-]
 CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
@@ -183,7 +176,7 @@ def signup():
             sentry_sdk.capture_exception(e) # Capture signup errors
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- LOGIN ---
+# --- LOGIN (MODIFIED FOR ENHANCED FEEDBACK) ---
 @app.route('/login', methods=['POST'])
 def login():
     try:
@@ -191,24 +184,41 @@ def login():
         uid = content.get("uid", "").strip()
         if not uid:
             return jsonify({'status': 'error', 'message': 'Missing UID'}), 400
+            
         user_ref = db.collection("users").document(uid)
         user_doc = user_ref.get()
+
         if not user_doc.exists:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+            return jsonify({'status': 'error', 'message': 'User profile not found in database.'}), 404
+        
         user_data = user_doc.to_dict()
+        user_status = user_data.get("status", "unknown")
+
+        # --- NEW: Specific status checks ---
+        if user_status == "pending":
+            return jsonify({'status': 'error', 'message': 'Your account is awaiting administrator approval.'}), 403 # 403 Forbidden
+        
+        if user_status == "rejected":
+            return jsonify({'status': 'error', 'message': 'Your account has been rejected. Please contact support.'}), 403 # 403 Forbidden
+            
+        if user_status != "active":
+            return jsonify({'status': 'error', 'message': 'This account is not active.'}), 403 # 403 Forbidden
+
+        # If active, return success
         return jsonify({
             'status': 'success',
             'hospital': user_data.get("hospital", ""),
             'role': user_data.get("role", ""),
             'uid': uid,
             'centerId': user_data.get("centerId", ""),
-            'status': user_data.get("status", "unknown")
+            'status': user_status
         }), 200
+
     except Exception as e:
         app.logger.error(f"Login failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e) # Capture login errors
-        return jsonify({'status': 'error', 'message': 'Login failed'}), 500
+        return jsonify({'status': 'error', 'message': 'An internal server error occurred during login.'}), 500
 
 # --- NEW: Generic Log Event Endpoint ---
 @app.route('/log_event', methods=['POST', 'OPTIONS'])
@@ -937,7 +947,9 @@ def save_annotation():
     except Exception as e:
         app.logger.error(f"Save annotation failed: {str(e)}", exc_info=True)
         if SENTRY_DSN: sentry_sdk.capture_exception(e)
-        return jsonify({'status': 'error', 'message': str(e)}), 500@app.route("/debug-sentry")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+        
+@app.route("/debug-sentry")
 def trigger_error():
     division_by_zero = 1 / 0
     return "Hello, world!"

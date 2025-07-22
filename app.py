@@ -779,9 +779,8 @@ def get_audit_logs():
             logs_query = logs_query.where('timestamp', '>=', start_of_day_utc)
             logs_query = logs_query.where('timestamp', '<', end_of_day_utc)
 
-        # *** FIX: Use Firestore filtering now that the data is consistent ***
-        if hospital_filter:
-            logs_query = logs_query.where('hospital', '==', hospital_filter)
+        # *** DEFINITIVE FIX: REMOVED ALL QUERY FILTERS EXCEPT DATE ***
+        # *** AND PERFORM FILTERING IN PYTHON AFTER FETCHING ***
         if action_filter:
             logs_query = logs_query.where('action', '==', action_filter)
 
@@ -790,6 +789,10 @@ def get_audit_logs():
         all_logs = []
         for doc in logs_query.stream():
             log_data = doc.to_dict()
+
+            # *** NEW: Manual filtering for hospital after fetching data ***
+            if hospital_filter and log_data.get('hospital') != hospital_filter:
+                continue
 
             if 'timestamp' in log_data and log_data['timestamp'] is not None:
                 utc_dt = log_data['timestamp'].astimezone(utc_timezone)

@@ -791,7 +791,7 @@ def get_audit_logs():
             log_data = doc.to_dict()
 
             # *** NEW: Manual filtering for hospital after fetching data ***
-            if hospital_filter and log_data.get('hospital') != hospital_filter:
+            if hospital_filter and log_data.get('hospital', '').lower() != hospital_filter.lower():
                 continue
 
             if 'timestamp' in log_data and log_data['timestamp'] is not None:

@@ -777,8 +777,9 @@ def get_audit_logs():
             logs_query = logs_query.where('timestamp', '>=', start_of_day_utc)
             logs_query = logs_query.where('timestamp', '<', end_of_day_utc)
 
-        if hospital_filter:
-            logs_query = logs_query.where('hospital', '==', hospital_filter)
+        # *** THIS IS THE FIX: REMOVED THE INCORRECT HOSPITAL FILTER ***
+        # if hospital_filter:
+        #     logs_query = logs_query.where('hospital', '==', hospital_filter)
         if action_filter:
             logs_query = logs_query.where('action', '==', action_filter)
 
@@ -787,6 +788,11 @@ def get_audit_logs():
         all_logs = []
         for doc in logs_query.stream():
             log_data = doc.to_dict()
+
+            # *** NEW: Manual filtering for hospital if a filter is provided ***
+            if hospital_filter and log_data.get('hospital') != hospital_filter:
+                continue
+
             if 'timestamp' in log_data and log_data['timestamp'] is not None:
                 utc_dt = log_data['timestamp'].astimezone(utc_timezone)
                 ist_dt = utc_dt.astimezone(user_timezone)

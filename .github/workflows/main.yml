@@ -28,10 +28,11 @@ jobs:
 
     # 4. Run the automated tests
     - name: Run pytest
+      env:
+        # *** THIS IS THE FIX ***
+        # Provide a dummy value for the environment variable during the test.
+        # This allows the app to be imported without crashing.
+        # The tests themselves will mock the database, so this value is not actually used.
+        FIREBASE_CREDENTIALS: "{}"
       run: |
         pytest
-# 5. If tests pass, trigger deployment on Render
-    - name: Deploy to Render
-      if: success() # This step only runs if the previous steps (like pytest) were successful
-      run: |
-        curl "${{ secrets.RENDER_DEPLOY_HOOK }}"

@@ -30,8 +30,8 @@ jobs:
     - name: Run pytest
       env:
         # *** THIS IS THE FIX ***
-        # Provide a minimal, valid dummy JSON object.
-        # This will pass the initial credential validation check in the Firebase Admin SDK.
-        FIREBASE_CREDENTIALS: '{"type": "service_account"}'
+        # Provide a structurally valid dummy JSON object that satisfies all
+        # of the Firebase Admin SDK's initial validation checks.
+        FIREBASE_CREDENTIALS: '{"type": "service_account", "project_id": "test", "private_key": "test", "client_email": "test@example.com", "token_uri": "test"}'
       run: |
         pytest

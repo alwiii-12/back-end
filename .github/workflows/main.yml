@@ -30,9 +30,8 @@ jobs:
     - name: Run pytest
       env:
         # *** THIS IS THE FIX ***
-        # Provide a dummy value for the environment variable during the test.
-        # This allows the app to be imported without crashing.
-        # The tests themselves will mock the database, so this value is not actually used.
-        FIREBASE_CREDENTIALS: "{}"
+        # Provide a minimal, valid dummy JSON object.
+        # This will pass the initial credential validation check in the Firebase Admin SDK.
+        FIREBASE_CREDENTIALS: '{"type": "service_account"}'
       run: |
         pytest

@@ -249,7 +249,6 @@ def log_event():
             app.logger.warning("Attempted to log event with missing action or userUid.")
             return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
 
-        # *** DEFINITIVE FIX: Normalize hospital name on write ***
         if 'hospital' in event_data and event_data['hospital']:
             event_data['hospital'] = event_data['hospital'].lower().replace(" ", "_")
 
@@ -783,16 +782,19 @@ def get_audit_logs():
             logs_query = logs_query.where('timestamp', '>=', start_of_day_utc)
             logs_query = logs_query.where('timestamp', '<', end_of_day_utc)
 
-        if hospital_filter:
-            logs_query = logs_query.where('hospital', '==', hospital_filter)
         if action_filter:
             logs_query = logs_query.where('action', '==', action_filter)
 
         logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING)
         
-        all_logs = []
-        for doc in logs_query.stream():
-            log_data = doc.to_dict()
+        all_logs_from_db = [doc.to_dict() for doc in logs_query.stream()]
+        
+        filtered_logs = []
+        for log_data in all_logs_from_db:
+            if hospital_filter:
+                log_hospital = log_data.get('hospital', '').lower().replace(" ", "_")
+                if log_hospital != hospital_filter:
+                    continue
 
             if 'timestamp' in log_data and log_data['timestamp'] is not None:
                 utc_dt = log_data['timestamp'].astimezone(utc_timezone)
@@ -807,9 +809,9 @@ def get_audit_logs():
                 log_data['user_display'] = log_data['userEmail']
             else:
                 log_data['user_display'] = 'N/A'
-            all_logs.append(log_data)
+            filtered_logs.append(log_data)
 
-        return jsonify({'status': 'success', 'logs': all_logs}), 200
+        return jsonify({'status': 'success', 'logs': filtered_logs}), 200
     except Exception as e:
         app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
         if SENTRY_DSN: sentry_sdk.capture_exception(e)

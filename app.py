@@ -249,6 +249,10 @@ def log_event():
             app.logger.warning("Attempted to log event with missing action or userUid.")
             return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
 
+        # *** DEFINITIVE FIX: Normalize hospital name on write ***
+        if 'hospital' in event_data and event_data['hospital']:
+            event_data['hospital'] = event_data['hospital'].lower().replace(" ", "_")
+
         event_data["timestamp"] = firestore.SERVER_TIMESTAMP
         
         db.collection("audit_logs").add(event_data)
@@ -589,7 +593,7 @@ def update_user_status():
             "changes": {},
             "oldData": {},
             "newData": {},
-            "hospital": old_user_data.get("hospital", "N/A") # *** FIX: ADD HOSPITAL TO LOG ***
+            "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")
         }
 
         if "status" in updates:
@@ -689,7 +693,7 @@ def delete_user():
             "action": "user_deletion",
             "targetUserUid": uid_to_delete,
             "deletedUserData": user_data_to_log,
-            "hospital": user_data_to_log.get("hospital", "N/A") # *** FIX: ADD HOSPITAL TO LOG ***
+            "hospital": user_data_to_log.get("hospital", "N/A").lower().replace(" ", "_")
         }
         db.collection("audit_logs").add(audit_entry)
         app.logger.info(f"Audit: User {uid_to_delete} deleted by {requesting_admin_uid}")
@@ -779,8 +783,8 @@ def get_audit_logs():
             logs_query = logs_query.where('timestamp', '>=', start_of_day_utc)
             logs_query = logs_query.where('timestamp', '<', end_of_day_utc)
 
-        # *** DEFINITIVE FIX: REMOVED ALL QUERY FILTERS EXCEPT DATE ***
-        # *** AND PERFORM FILTERING IN PYTHON AFTER FETCHING ***
+        if hospital_filter:
+            logs_query = logs_query.where('hospital', '==', hospital_filter)
         if action_filter:
             logs_query = logs_query.where('action', '==', action_filter)
 
@@ -789,10 +793,6 @@ def get_audit_logs():
         all_logs = []
         for doc in logs_query.stream():
             log_data = doc.to_dict()
-
-            # *** NEW: Manual filtering for hospital after fetching data ***
-            if hospital_filter and log_data.get('hospital', '').lower() != hospital_filter.lower():
-                continue
 
             if 'timestamp' in log_data and log_data['timestamp'] is not None:
                 utc_dt = log_data['timestamp'].astimezone(utc_timezone)

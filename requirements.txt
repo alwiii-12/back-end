@@ -5,6 +5,6 @@ firebase-admin
 pandas
 openpyxl
 sentry-sdk[flask]
-joblib
-spacy
 numpy
+pytz
+PyJWT

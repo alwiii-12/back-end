@@ -22,13 +22,12 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-mock
 
-    # Use a dedicated action to create the file reliably
+    # Use a current, valid action to create the file
     - name: Create dummy credential file
-      uses: SpicyPizza/create-file-action@v2.0
+      uses: damienaiche/create-file-action@v1.0.0
       with:
         file_name: 'dummy-creds.json'
         file_content: ${{ secrets.DUMMY_FIREBASE_CREDS }}
-
 
     - name: Run pytest
       env:

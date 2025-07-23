@@ -22,13 +22,13 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-mock
 
-    # New step to create the dummy credential file
+    # Corrected step to create the dummy credential file
     - name: Create dummy credential file
       run: |
-        echo '${{ secrets.DUMMY_FIREBASE_CREDS }}' > dummy-creds.json
+        echo ${{ secrets.DUMMY_FIREBASE_CREDS }} > dummy-creds.json
       shell: bash
 
-    # Modified step to use the credential file
+    # This step remains the same
     - name: Run pytest
       env:
         # Point to the credential file we just created

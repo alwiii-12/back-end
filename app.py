@@ -61,6 +61,32 @@ CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
 
+# --- MODIFIED FIREBASE INIT ---
+# This new logic makes initialization more flexible for different environments.
+if not firebase_admin._apps:
+    try:
+        # Standard method: Tries to use GOOGLE_APPLICATION_CREDENTIALS env var (for testing/CI)
+        firebase_admin.initialize_app()
+        app.logger.info("Firebase app initialized using default credentials (file-based).")
+    except Exception as e:
+        app.logger.warning(f"Default Firebase init failed: {e}. Trying JSON environment variable.")
+        # Fallback method: Use the JSON string from the environment (for production on Render)
+        firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS")
+        if not firebase_json_str:
+            if sentry_sdk_configured:
+                sentry_sdk.capture_message("CRITICAL: FIREBASE_CREDENTIALS not set.", level="fatal")
+            raise Exception("FIREBASE_CREDENTIALS environment variable not set and default init failed.")
+        
+        firebase_dict = json.loads(firebase_json_str)
+        cred = credentials.Certificate(firebase_dict)
+        firebase_admin.initialize_app(cred)
+        app.logger.info("Firebase app initialized using JSON environment variable.")
+else:
+    app.logger.info("Firebase default app already initialized, skipping init.")
+
+db = firestore.client()
+# --- END MODIFIED FIREBASE INIT ---
+
 # --- [EMAIL CONFIG] ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
@@ -93,24 +119,7 @@ def send_notification_email(recipient_email, subject, body):
             sentry_sdk.capture_exception(e) # Capture the exception with Sentry
         return False
 
-# --- [FIREBASE INIT] ---
-firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
-if not firebase_json:
-    if sentry_sdk_configured:
-        sentry_sdk.capture_message("CRITICAL: FIREBASE_CREDENTIALS environment variable not set.", level="fatal")
-    raise Exception("FIREBASE_CREDENTIALS not set")
-firebase_dict = json.loads(firebase_json)
-
-if not firebase_admin._apps:
-    cred = credentials.Certificate(firebase_dict)
-    firebase_admin.initialize_app(cred)
-    app.logger.info("Firebase default app initialized.")
-else:
-    app.logger.info("Firebase default app already initialized, skipping init.")
-
-db = firestore.client()
-
-# --- MODIFIED SECTION ---
+# --- NEW: APP CHECK VERIFICATION ---
 # This function will run before every request to a protected endpoint.
 @app.before_request
 def verify_app_check_token():
@@ -143,7 +152,6 @@ def verify_app_check_token():
     except Exception as e:
         app.logger.error(f"App Check verification failed with an unexpected error: {e}")
         return jsonify({'error': 'Unauthorized: App Check verification failed'}), 401
-# --- END MODIFIED SECTION ---
 
 
 # Defined once here for consistency

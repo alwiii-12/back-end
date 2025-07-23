@@ -33,18 +33,18 @@ import json
 import logging
 from calendar import monthrange
 from datetime import datetime, timedelta
-import re
+import re 
 import pytz # Import pytz for timezone handling
 
 import firebase_admin
-from firebase_admin import credentials, firestore, auth, app_check
-import jwt
+from firebase_admin import credentials, firestore, auth, app_check # <-- NEW: Import app_check
+import jwt # <-- NEW: Import for decoding errors
 
 # New imports for Excel export
 import pandas as pd
 from io import BytesIO
 
-import numpy as np
+import numpy as np 
 
 
 # Set nlp to None explicitly, as it's no longer loaded
@@ -61,33 +61,6 @@ CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
 
-
-# --- MODIFIED FIREBASE INIT ---
-# This new logic makes initialization more flexible for different environments.
-if not firebase_admin._apps:
-    try:
-        # Standard method: Tries to use GOOGLE_APPLICATION_CREDENTIALS env var (for testing/CI)
-        firebase_admin.initialize_app()
-        app.logger.info("Firebase app initialized using default credentials (file-based).")
-    except Exception as e:
-        app.logger.warning(f"Default Firebase init failed: {e}. Trying JSON environment variable.")
-        # Fallback method: Use the JSON string from the environment (for production on Render)
-        firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS")
-        if not firebase_json_str:
-            if sentry_sdk_configured:
-                sentry_sdk.capture_message("CRITICAL: FIREBASE_CREDENTIALS not set.", level="fatal")
-            raise Exception("FIREBASE_CREDENTIALS environment variable not set and default init failed.")
-
-        firebase_dict = json.loads(firebase_json_str)
-        cred = credentials.Certificate(firebase_dict)
-        firebase_admin.initialize_app(cred)
-        app.logger.info("Firebase app initialized using JSON environment variable.")
-else:
-    app.logger.info("Firebase default app already initialized, skipping init.")
-
-db = firestore.client()
-# --- END MODIFIED FIREBASE INIT ---
-
 # --- [EMAIL CONFIG] ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
@@ -100,13 +73,13 @@ def send_notification_email(recipient_email, subject, body):
         if sentry_sdk_configured:
             sentry_sdk.capture_message(f"EMAIL_APP_PASSWORD not set. Cannot send notification to {recipient_email}.", level="warning")
         return False
-
+    
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
-
+    
     try:
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(SENDER_EMAIL, APP_PASSWORD)
@@ -120,6 +93,23 @@ def send_notification_email(recipient_email, subject, body):
             sentry_sdk.capture_exception(e) # Capture the exception with Sentry
         return False
 
+# --- [FIREBASE INIT] ---
+firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+if not firebase_json:
+    if sentry_sdk_configured:
+        sentry_sdk.capture_message("CRITICAL: FIREBASE_CREDENTIALS environment variable not set.", level="fatal")
+    raise Exception("FIREBASE_CREDENTIALS not set")
+firebase_dict = json.loads(firebase_json)
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_dict)
+    firebase_admin.initialize_app(cred)
+    app.logger.info("Firebase default app initialized.")
+else:
+    app.logger.info("Firebase default app already initialized, skipping init.")
+
+db = firestore.client()
+
 # --- NEW: APP CHECK VERIFICATION ---
 # This function will run before every request to a protected endpoint.
 @app.before_request
@@ -127,15 +117,12 @@ def verify_app_check_token():
     # The App Check token is passed in the 'X-Firebase-AppCheck' header.
     app_check_token = request.headers.get('X-Firebase-AppCheck')
 
-    # Define a list of public paths that don't need App Check verification
-    public_paths = ['/', '/login', '/signup']
-
     # Allow OPTIONS requests to pass through for CORS preflight.
     if request.method == 'OPTIONS':
         return None
-
-    # Allow public paths to be accessed without a token
-    if request.path in public_paths:
+    
+    # Allow the root index page to be accessed without a token for health checks
+    if request.path == '/':
         return None
 
     if not app_check_token:
@@ -215,22 +202,22 @@ def login():
         uid = content.get("uid", "").strip()
         if not uid:
             return jsonify({'status': 'error', 'message': 'Missing UID'}), 400
-
+            
         user_ref = db.collection("users").document(uid)
         user_doc = user_ref.get()
 
         if not user_doc.exists:
             return jsonify({'status': 'error', 'message': 'User profile not found in database.'}), 404
-
+        
         user_data = user_doc.to_dict()
         user_status = user_data.get("status", "unknown")
 
         if user_status == "pending":
             return jsonify({'status': 'error', 'message': 'Your account is awaiting administrator approval.'}), 403
-
+        
         if user_status == "rejected":
             return jsonify({'status': 'error', 'message': 'Your account has been rejected. Please contact support.'}), 403
-
+            
         if user_status != "active":
             return jsonify({'status': 'error', 'message': 'This account is not active.'}), 403
 
@@ -257,7 +244,7 @@ def log_event():
 
     try:
         event_data = request.get_json(force=True)
-
+        
         if not event_data.get("action") or not event_data.get("userUid"):
             app.logger.warning("Attempted to log event with missing action or userUid.")
             return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
@@ -266,7 +253,7 @@ def log_event():
             event_data['hospital'] = event_data['hospital'].lower().replace(" ", "_")
 
         event_data["timestamp"] = firestore.SERVER_TIMESTAMP
-
+        
         db.collection("audit_logs").add(event_data)
         app.logger.info(f"Audit: Logged event '{event_data.get('action')}' for UID {event_data.get('userUid')}.")
         return jsonify({'status': 'success', 'message': 'Event logged successfully'}), 200
@@ -305,11 +292,11 @@ def save_data():
 
         month_doc_id = f"Month_{month_param}"
         converted = [{"row": i, "energy": row[0], "values": row[1:]} for i, row in enumerate(raw_data) if len(row) > 1]
-
+        
         firestore_field_name = f"data_{data_type}"
         doc_ref = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id)
         doc_ref.set({firestore_field_name: converted}, merge=True)
-
+        
         return jsonify({'status': 'success', 'message': f'{data_type} data saved successfully'}), 200
 
     except Exception as e:
@@ -347,7 +334,7 @@ def get_data():
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
         energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
-
+        
         firestore_field_name = f"data_{data_type}"
 
         doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
@@ -378,7 +365,7 @@ def send_alert():
         month_key = content.get("month")
         data_type = content.get("dataType", "output")
         tolerance_percent = content.get("tolerance", 2.0)
-
+        
         data_type_display = data_type.replace("_", " ").title()
 
         if not uid or not month_key:
@@ -404,7 +391,7 @@ def send_alert():
 
         month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}_{data_type}")
         alerts_doc_snap = month_alerts_doc_ref.get()
-
+        
         previously_alerted = alerts_doc_snap.to_dict().get("alerted_values", []) if alerts_doc_snap.exists else []
         previously_alerted_strings = set(json.dumps(val, sort_keys=True) for val in previously_alerted)
         current_out_values_strings = set(json.dumps(val, sort_keys=True) for val in current_out_values)
@@ -450,15 +437,15 @@ def query_qa_data():
         if not user_doc.exists: return jsonify({'status': 'error', 'message': 'User not found'}), 404
         center_id = user_doc.to_dict().get("centerId")
         if not center_id: return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
-
+        
         lower_case_query = user_query_text.lower()
-
+        
         query_data_type = data_type_context
         if 'flatness' in lower_case_query: query_data_type = 'flatness'
         elif 'inline' in lower_case_query: query_data_type = 'inline'
         elif 'crossline' in lower_case_query: query_data_type = 'crossline'
         elif 'output' in lower_case_query: query_data_type = 'output'
-
+        
         config = DATA_TYPE_CONFIGS[query_data_type]
         warning_threshold = config["warning"]
         tolerance_threshold = config["tolerance"]
@@ -468,7 +455,7 @@ def query_qa_data():
 
         year, mon = map(int, month_param.split("-"))
         date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
-
+        
         if "out of tolerance" in lower_case_query:
             out_dates = set()
             for row in data_rows:
@@ -531,12 +518,12 @@ def get_all_users():
 
         if status_filter:
             users_query = users_query.where('status', '==', status_filter)
-
+        
         if hospital_filter:
             users_query = users_query.where('hospital', '==', hospital_filter)
 
         users_stream = users_query.stream()
-
+        
         all_users = []
         for doc in users_stream:
             user_data = doc.to_dict()
@@ -549,7 +536,7 @@ def get_all_users():
                         search_term_lower in user_data.get('role', '').lower() or
                         search_term_lower in user_data.get('hospital', '').lower()):
                     continue
-
+            
             all_users.append(user_data)
 
         return jsonify(all_users), 200
@@ -568,8 +555,8 @@ def update_user_status():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-
-        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token)
+        
+        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token) 
 
         new_status = content.get("status")
         new_role = content.get("role")
@@ -577,7 +564,7 @@ def update_user_status():
 
         if not uid:
             return jsonify({'message': 'UID is required'}), 400
-
+        
         updates = {}
         if new_status is not None and new_status in ["active", "pending", "rejected"]:
             updates["status"] = new_status
@@ -591,7 +578,7 @@ def update_user_status():
             return jsonify({'message': 'No valid fields provided for update'}), 400
 
         ref = db.collection("users").document(uid)
-
+        
         old_user_doc = ref.get()
         old_user_data = old_user_doc.to_dict() if old_user_doc.exists else {}
 
@@ -620,7 +607,7 @@ def update_user_status():
             audit_entry["changes"]["hospital"] = {"old": old_user_data.get("hospital"), "new": updates["hospital"]}
             audit_entry["oldData"]["hospital"] = old_user_data.get("hospital")
             audit_entry["newData"]["hospital"] = updates["hospital"]
-
+        
         audit_entry["targetUserEmail"] = old_user_data.get("email", "N/A")
         audit_entry["targetUserName"] = old_user_data.get("name", "N/A")
 
@@ -631,7 +618,7 @@ def update_user_status():
         if updated_user_data.get("email"):
             subject = "LINAC QA Account Update"
             body = f"Your LINAC QA account details have been updated."
-
+            
             if "status" in updates:
                 status_text = updates["status"].upper()
                 body += f"\nYour account status is now: {status_text}."
@@ -639,7 +626,7 @@ def update_user_status():
                     body += " You can now log in and use the portal."
                 elif status_text == "REJECTED":
                     body += " Please contact support for more information."
-
+            
             if "role" in updates:
                  body += f"\nYour role has been updated to: {updates['role']}."
             if "hospital" in updates:
@@ -698,7 +685,7 @@ def delete_user():
             app.logger.warning(f"Firestore user document {uid_to_delete} not found (already deleted?).")
             if sentry_sdk_configured:
                 sentry_sdk.capture_message(f"Firestore user document {uid_to_delete} not found during deletion attempt.", level="warning")
-
+        
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
             "adminUid": requesting_admin_uid,
@@ -742,20 +729,20 @@ def get_hospital_qa_data():
         doc_snap = doc_ref.get()
 
         all_data_tables = {}
-
+        
         firestore_data = doc_snap.to_dict() if doc_snap.exists else {}
 
         for data_type in DATA_TYPES:
             field_name = f"data_{data_type}"
             energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
-
+            
             if field_name in firestore_data:
                 for row in firestore_data[field_name]:
                     energy = row.get("energy")
                     values = row.get("values", [])
                     if energy in energy_dict:
                         energy_dict[energy] = (values + [""] * num_days)[:num_days]
-
+            
             all_data_tables[data_type] = [[e] + energy_dict[e] for e in ENERGY_TYPES]
 
         return jsonify({'status': 'success', 'data': all_data_tables}), 200
@@ -781,7 +768,7 @@ def get_audit_logs():
 
     try:
         logs_query = db.collection("audit_logs")
-
+        
         user_timezone = pytz.timezone('Asia/Kolkata')
         utc_timezone = pytz.utc
 
@@ -791,7 +778,7 @@ def get_audit_logs():
             end_of_day_local = start_of_day_local + timedelta(days=1)
             start_of_day_utc = start_of_day_local.astimezone(utc_timezone)
             end_of_day_utc = end_of_day_local.astimezone(utc_timezone)
-
+            
             logs_query = logs_query.where('timestamp', '>=', start_of_day_utc)
             logs_query = logs_query.where('timestamp', '<', end_of_day_utc)
 
@@ -799,9 +786,9 @@ def get_audit_logs():
             logs_query = logs_query.where('action', '==', action_filter)
 
         logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING)
-
+        
         all_logs_from_db = [doc.to_dict() for doc in logs_query.stream()]
-
+        
         filtered_logs = []
         for log_data in all_logs_from_db:
             if hospital_filter:
@@ -815,7 +802,7 @@ def get_audit_logs():
                 log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p")
             else:
                 log_data['timestamp'] = 'No Timestamp'
-
+            
             if 'targetUserName' in log_data:
                 log_data['user_display'] = f"{log_data['targetUserName']} ({log_data.get('targetUserEmail', 'N/A')})"
             elif 'userEmail' in log_data:
@@ -859,14 +846,14 @@ def export_excel():
 
         firestore_field_name = f"data_{data_type}"
         doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
-
+        
         if doc.exists:
             doc_data = doc.to_dict().get(firestore_field_name, [])
             for row in doc_data:
                 energy, values = row.get("energy"), row.get("values", [])
                 if energy in energy_dict:
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
-
+        
         data_for_df = []
         columns = ['Energy']
         for i in range(1, num_days + 1):
@@ -943,7 +930,7 @@ def save_annotation():
         app.logger.error(f"Save annotation failed: {str(e)}", exc_info=True)
         if SENTRY_DSN: sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
+        
 @app.route("/debug-sentry")
 def trigger_error():
     division_by_zero = 1 / 0

@@ -30,7 +30,8 @@ jobs:
     - name: Run pytest
       env:
         # Provide a full, structurally valid dummy JSON for Firebase Admin SDK
-        FIREBASE_CREDENTIALS: >
+        # The "|" character is crucial for preserving the multi-line private key.
+        FIREBASE_CREDENTIALS: |
           {
             "type": "service_account",
             "project_id": "test-project-12345",

@@ -22,12 +22,17 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-mock
 
-    # Use a 'here document' to reliably create the file
     - name: Create dummy credential file
       run: |
         cat > dummy-creds.json << EOF
         ${{ secrets.DUMMY_FIREBASE_CREDS }}
         EOF
+      shell: bash
+
+    # NEW DEBUGGING STEP
+    - name: Display contents of credential file for debugging
+      run: |
+        cat dummy-creds.json
       shell: bash
 
     - name: Run pytest

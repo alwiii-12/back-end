@@ -22,22 +22,7 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-mock
 
-    - name: Create dummy credential file
-      run: |
-        cat > dummy-creds.json << EOF
-        ${{ secrets.DUMMY_FIREBASE_CREDS }}
-        EOF
-      shell: bash
-
-    # NEW DEBUGGING STEP
-    - name: Display contents of credential file for debugging
-      run: |
-        cat dummy-creds.json
-      shell: bash
-
+    # We no longer need to create a credential file or set environment variables.
     - name: Run pytest
-      env:
-        # Point to the credential file we just created
-        GOOGLE_APPLICATION_CREDENTIALS: dummy-creds.json
       run: |
         pytest

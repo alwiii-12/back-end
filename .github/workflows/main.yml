@@ -22,7 +22,14 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-mock
 
-    # We no longer need to create a credential file or set environment variables.
+    # New step to show us the exact content of the test file
+    - name: Show Test File Content for Debugging
+      run: |
+        echo "--- Displaying content of tests/test_app.py ---"
+        cat tests/test_app.py
+        echo "--- End of file content ---"
+      shell: bash
+
     - name: Run pytest
       run: |
         pytest

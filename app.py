@@ -110,19 +110,22 @@ else:
 
 db = firestore.client()
 
-# --- NEW: APP CHECK VERIFICATION ---
+# --- MODIFIED SECTION ---
 # This function will run before every request to a protected endpoint.
 @app.before_request
 def verify_app_check_token():
     # The App Check token is passed in the 'X-Firebase-AppCheck' header.
     app_check_token = request.headers.get('X-Firebase-AppCheck')
 
+    # Define a list of public paths that don't need App Check verification
+    public_paths = ['/', '/login', '/signup']
+
     # Allow OPTIONS requests to pass through for CORS preflight.
     if request.method == 'OPTIONS':
         return None
     
-    # Allow the root index page to be accessed without a token for health checks
-    if request.path == '/':
+    # Allow public paths to be accessed without a token
+    if request.path in public_paths:
         return None
 
     if not app_check_token:
@@ -140,6 +143,7 @@ def verify_app_check_token():
     except Exception as e:
         app.logger.error(f"App Check verification failed with an unexpected error: {e}")
         return jsonify({'error': 'Unauthorized: App Check verification failed'}), 401
+# --- END MODIFIED SECTION ---
 
 
 # Defined once here for consistency

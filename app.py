@@ -37,8 +37,8 @@ import re
 import pytz # Import pytz for timezone handling
 
 import firebase_admin
-from firebase_admin import credentials, firestore, auth, app_check # <-- NEW: Import app_check
-import jwt # <-- NEW: Import for decoding errors
+from firebase_admin import credentials, firestore, auth, app_check
+import jwt
 
 # New imports for Excel export
 import pandas as pd
@@ -111,28 +111,18 @@ else:
 db = firestore.client()
 
 # --- NEW: APP CHECK VERIFICATION ---
-# This function will run before every request to a protected endpoint.
 @app.before_request
 def verify_app_check_token():
-    # The App Check token is passed in the 'X-Firebase-AppCheck' header.
     app_check_token = request.headers.get('X-Firebase-AppCheck')
-
-    # Allow OPTIONS requests to pass through for CORS preflight.
     if request.method == 'OPTIONS':
         return None
-    
-    # Allow the root index page to be accessed without a token for health checks
     if request.path == '/':
         return None
-
     if not app_check_token:
         app.logger.warning("App Check token missing.")
         return jsonify({'error': 'Unauthorized: App Check token is missing'}), 401
-
     try:
-        # Verify the token. If the token is invalid, this will raise an error.
         app_check.verify_token(app_check_token)
-        # If verification succeeds, continue to the route handler.
         return None
     except (ValueError, jwt.exceptions.DecodeError) as e:
         app.logger.error(f"Invalid App Check token: {e}")
@@ -141,8 +131,7 @@ def verify_app_check_token():
         app.logger.error(f"App Check verification failed with an unexpected error: {e}")
         return jsonify({'error': 'Unauthorized: App Check verification failed'}), 401
 
-
-# Defined once here for consistency
+# --- CONSTANTS ---
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
 DATA_TYPE_CONFIGS = {
@@ -151,7 +140,6 @@ DATA_TYPE_CONFIGS = {
     "inline": {"warning": 0.9, "tolerance": 1.0},
     "crossline": {"warning": 0.9, "tolerance": 1.0}
 }
-
 
 # --- VERIFY ADMIN TOKEN ---
 def verify_admin_token(id_token):
@@ -929,6 +917,43 @@ def save_annotation():
     except Exception as e:
         app.logger.error(f"Save annotation failed: {str(e)}", exc_info=True)
         if SENTRY_DSN: sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- [NEW] DELETE ANNOTATION ---
+@app.route('/delete-annotation', methods=['POST', 'OPTIONS'])
+def delete_annotation():
+    if request.method == 'OPTIONS':
+        return '', 200 # Handle CORS preflight
+
+    try:
+        content = request.get_json(force=True)
+        uid, month_param, key = content.get("uid"), content.get("month"), content.get("key")
+        
+        if not all([uid, month_param, key]):
+            return jsonify({'status': 'error', 'message': 'Missing data for deletion'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        
+        center_id = user_doc.to_dict().get("centerId")
+        if not center_id:
+            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
+
+        doc_ref = db.collection("linac_annotations").document(center_id).collection("months").document(f"Month_{month_param}")
+        
+        # Use update with DELETE_FIELD to remove a specific field from the document
+        doc_ref.update({
+            key: firestore.DELETE_FIELD
+        })
+        
+        app.logger.info(f"Annotation '{key}' deleted for center '{center_id}' in month '{month_param}'.")
+        return jsonify({'status': 'success', 'message': 'Annotation deleted successfully'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Delete annotation failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
         
 @app.route("/debug-sentry")

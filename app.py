@@ -110,7 +110,7 @@ else:
 
 db = firestore.client()
 
-# --- NEW: APP CHECK VERIFICATION ---
+# --- APP CHECK VERIFICATION ---
 @app.before_request
 def verify_app_check_token():
     app_check_token = request.headers.get('X-Firebase-AppCheck')
@@ -223,6 +223,51 @@ def login():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': 'An internal server error occurred during login.'}), 500
+
+# --- UPDATE PROFILE ROUTE ---
+@app.route('/update-profile', methods=['POST'])
+def update_profile():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid")
+        new_name = content.get("name")
+        new_hospital = content.get("hospital")
+
+        if not all([uid, new_name, new_hospital]):
+            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+
+        user_ref = db.collection('users').document(uid)
+        if not user_ref.get().exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+
+        updates = {
+            'name': new_name,
+            'hospital': new_hospital,
+            'centerId': new_hospital # Also update centerId if it's tied to hospital
+        }
+        
+        user_ref.update(updates)
+
+        # Log the update action
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "userUid": uid,
+            "action": "profile_self_update",
+            "changes": {
+                "name": new_name,
+                "hospital": new_hospital
+            }
+        }
+        db.collection("audit_logs").add(audit_entry)
+        
+        app.logger.info(f"User {uid} updated their profile.")
+        return jsonify({'status': 'success', 'message': 'Profile updated successfully'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Profile update failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- LOG EVENT ---
 @app.route('/log_event', methods=['POST', 'OPTIONS'])
@@ -919,11 +964,10 @@ def save_annotation():
         if SENTRY_DSN: sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- [NEW] DELETE ANNOTATION ---
 @app.route('/delete-annotation', methods=['POST', 'OPTIONS'])
 def delete_annotation():
     if request.method == 'OPTIONS':
-        return '', 200 # Handle CORS preflight
+        return '', 200
 
     try:
         content = request.get_json(force=True)
@@ -942,7 +986,6 @@ def delete_annotation():
 
         doc_ref = db.collection("linac_annotations").document(center_id).collection("months").document(f"Month_{month_param}")
         
-        # Use update with DELETE_FIELD to remove a specific field from the document
         doc_ref.update({
             key: firestore.DELETE_FIELD
         })

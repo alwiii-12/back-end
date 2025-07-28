@@ -7,8 +7,8 @@ import os
 import json
 from calendar import monthrange
 
-# --- INITIALIZE FIREBASE ADMIN (copy from your app.py) ---
-# Ensure you have your FIREBASE_CREDENTIALS environment variable set
+# --- INITIALIZE FIREBASE ADMIN ---
+# This pulls your credentials from the environment variables you've set up.
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
 if not firebase_json:
     raise Exception("CRITICAL: FIREBASE_CREDENTIALS environment variable not set.")
@@ -57,7 +57,7 @@ def fetch_historical_data(center_id, data_type, energy_type):
                             continue
     
     if not all_values:
-        print("No data found.")
+        print("No data found for this energy type.")
         return pd.DataFrame()
 
     # Convert to DataFrame, sort by date, and set date as index
@@ -81,9 +81,6 @@ def train_and_save_model(data_df, model_path):
 
     print("Training ARIMA model...")
     # The order (p,d,q) is a key parameter. (5,1,0) is a common starting point.
-    # p: The number of lag observations in the model (lag order).
-    # d: The number of times the raw observations are differenced (degree of differencing).
-    # q: The size of the moving average window (order of moving average).
     model = ARIMA(data_df['value'], order=(5, 1, 0))
     model_fit = model.fit()
     
@@ -95,22 +92,34 @@ def train_and_save_model(data_df, model_path):
 
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == '__main__':
-    # --- Parameters for the model you want to train ---
-    # Replace these with a centerId, dataType, and energyType from your database
+    # --- Parameters for the models you want to train ---
     TARGET_CENTER_ID = "aoi_gurugram" 
-    TARGET_DATA_TYPE = "output"
-    TARGET_ENERGY_TYPE = "6X"
+    TARGET_DATA_TYPE = "output" # We'll train all energies for the 'output' data type
 
-    # Fetch the data
-    historical_df = fetch_historical_data(TARGET_CENTER_ID, TARGET_DATA_TYPE, TARGET_ENERGY_TYPE)
+    # List of all energy types to train models for
+    ENERGY_TYPES_TO_TRAIN = [
+        "6X", "10X", "15X", "6X FFF", "10X FFF", "6E", 
+        "9E", "12E", "15E", "18E"
+    ]
+
+    print(f"--- Starting batch training for {TARGET_CENTER_ID} - {TARGET_DATA_TYPE} ---")
+
+    # Loop through each energy type and train a separate model
+    for energy in ENERGY_TYPES_TO_TRAIN:
+        print(f"\n--- Processing Energy: {energy} ---")
+
+        # Fetch the data for the current energy
+        historical_df = fetch_historical_data(TARGET_CENTER_ID, TARGET_DATA_TYPE, energy)
+        
+        if not historical_df.empty:
+            # Define where to save the model file
+            if not os.path.exists('models'):
+                os.makedirs('models')
+            
+            # The filename is now dynamic based on the energy type
+            model_filename = f"models/model_{TARGET_CENTER_ID}_{TARGET_DATA_TYPE}_{energy}.pkl"
+            
+            # Train and save the model
+            train_and_save_model(historical_df, model_filename)
     
-    if not historical_df.empty:
-        # Define where to save the model file
-        # Creating a directory for models is a good practice
-        if not os.path.exists('models'):
-            os.makedirs('models')
-        
-        model_filename = f"models/model_{TARGET_CENTER_ID}_{TARGET_DATA_TYPE}_{TARGET_ENERGY_TYPE}.pkl"
-        
-        # Train and save the model
-        train_and_save_model(historical_df, model_filename)
+    print("\n--- Batch training complete. ---")

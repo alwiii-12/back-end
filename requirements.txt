@@ -8,3 +8,5 @@ sentry-sdk[flask]
 numpy
 pytz
 PyJWT
+statsmodels
+scikit-learn

@@ -1003,6 +1003,44 @@ def delete_annotation():
 def trigger_error():
     division_by_zero = 1 / 0
     return "Hello, world!"
+    
+# --- NEW PREDICTIONS ENDPOINT ---
+@app.route('/predictions', methods=['GET'])
+def get_predictions():
+    try:
+        # 1. Get parameters from the frontend request
+        uid = request.args.get('uid')
+        data_type = request.args.get('dataType')
+        energy = request.args.get('energy')
+
+        if not all([uid, data_type, energy]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        # 2. Get the user's centerId to find the correct document
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+
+        if not center_id:
+            return jsonify({'error': 'User has no associated center'}), 400
+
+        # 3. Fetch the specific prediction document from Firestore
+        prediction_doc_id = f"{center_id}_{data_type}_{energy}"
+        prediction_doc = db.collection("linac_predictions").document(prediction_doc_id).get()
+
+        if prediction_doc.exists:
+            # 4. If found, return the prediction data
+            return jsonify(prediction_doc.to_dict()), 200
+        else:
+            # 5. If not found, return an error
+            return jsonify({'error': 'Prediction not found'}), 404
+            
+    except Exception as e:
+        app.logger.error(f"Get predictions failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
 
 # --- INDEX ---
 @app.route('/')

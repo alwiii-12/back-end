@@ -387,40 +387,49 @@ def get_data():
         return jsonify({'error': str(e)}), 500
 
 
-# --- ALERT EMAIL ---
+# --- ALERT EMAIL (with added logging) ---
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
+    app.logger.info("--- 📧 /send-alert endpoint triggered ---")
     try:
         content = request.get_json(force=True)
-        current_out_values = content.get("outValues", [])
-        hospital = content.get("hospitalName", "Unknown")
         uid = content.get("uid")
-        month_key = content.get("month")
-        data_type = content.get("dataType", "output")
-        tolerance_percent = content.get("tolerance", 2.0)
-        
-        data_type_display = data_type.replace("_", " ").title()
-
-        if not uid or not month_key:
-            return jsonify({'status': 'error', 'message': 'Missing UID or month for alert processing'}), 400
+        app.logger.info(f"Step 1: Received alert request from UID: {uid}")
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
+            app.logger.warning("Step 2 FAILED: User document not found.")
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        
         user_data = user_doc.to_dict()
         center_id = user_data.get('centerId')
+        app.logger.info(f"Step 2: Found user's centerId: '{center_id}'")
 
         if not center_id:
-            return jsonify({'status': 'error', 'message': 'Center ID not found for user'}), 400
+             app.logger.warning("Step 3 FAILED: centerId is missing for the user.")
+             return jsonify({'status': 'error', 'message': 'Center ID not found for user'}), 400
 
-        rso_users = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO').stream()
-        rso_emails = [rso.to_dict()['email'] for rso in rso_users if 'email' in rso.to_dict()]
+        app.logger.info(f"Step 3: Querying for RSO with centerId='{center_id}' and role='RSO'")
+        rso_users_query = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO')
+        rso_users_stream = rso_users_query.stream()
+        
+        rso_emails = [rso.to_dict()['email'] for rso in rso_users_stream if 'email' in rso.to_dict()]
+        
+        app.logger.info(f"Step 4: Found {len(rso_emails)} RSO emails: {rso_emails}")
 
         if not rso_emails:
+            app.logger.warning("Step 5: No RSO emails found. Alert process stopping here.")
             return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200
 
-        if not APP_PASSWORD:
-            return jsonify({'status': 'email_credentials_missing', 'message': 'Email credentials missing'}), 500
+        app.logger.info("Step 5: RSO emails found. Proceeding to send notification.")
+        
+        # --- Original function logic continues here ---
+        current_out_values = content.get("outValues", [])
+        hospital = content.get("hospitalName", "Unknown")
+        month_key = content.get("month")
+        data_type = content.get("dataType", "output")
+        tolerance_percent = content.get("tolerance", 2.0)
+        data_type_display = data_type.replace("_", " ").title()
 
         month_alerts_doc_ref = db.collection("linac_alerts").document(center_id).collection("months").document(f"Month_{month_key}_{data_type}")
         alerts_doc_snap = month_alerts_doc_ref.get()
@@ -430,6 +439,7 @@ def send_alert():
         current_out_values_strings = set(json.dumps(val, sort_keys=True) for val in current_out_values)
 
         if current_out_values_strings == previously_alerted_strings:
+            app.logger.info("Step 6: No changes in alert values. Email not sent.")
             return jsonify({'status': 'no_change', 'message': 'No new alerts or changes. Email not sent.'})
 
         message_body = f"{data_type_display} QA Status Update for {hospital} ({month_key})\n\n"
@@ -440,15 +450,19 @@ def send_alert():
         else:
             message_body += f"All previously detected {data_type_display} QA issues for this month are now resolved.\n"
 
+        app.logger.info(f"Step 6: Attempting to send email to: {', '.join(rso_emails)}")
         email_sent = send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital} ({month_key})", message_body)
 
         if email_sent:
+            app.logger.info("Step 7: Email sent successfully.")
             month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
             return jsonify({'status': 'alert sent'}), 200
         else:
+            app.logger.error("Step 7 FAILED: The send_notification_email function returned False.")
             return jsonify({'status': 'email_send_error', 'message': 'Failed to send email.'}), 500
+
     except Exception as e:
-        app.logger.error(f"Error in send_alert function: {str(e)}", exc_info=True)
+        app.logger.error(f"--- ❌ UNHANDLED EXCEPTION in /send-alert: {str(e)} ---", exc_info=True)
         if SENTRY_DSN: sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 

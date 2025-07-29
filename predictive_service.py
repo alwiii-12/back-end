@@ -79,7 +79,6 @@ def train_and_save_model(data_df, model_path):
     joblib.dump(model_fit, model_path)
     print("Model saved successfully.")
     
-    # Return both the model and the last date from the training data
     return model_fit, data_df.index[-1]
 
 # --- PREDICTION GENERATION FUNCTION ---
@@ -102,7 +101,6 @@ def generate_and_save_predictions(center_id, data_type, energy_type, model_path,
 
     forecast_data = []
     for i in range(forecast_steps):
-        # Manually calculate the date for each forecast step
         forecast_date = last_date + timedelta(days=i + 1)
         forecast_data.append({
             "date": forecast_date.strftime('%Y-%m-%d'),
@@ -125,30 +123,40 @@ def generate_and_save_predictions(center_id, data_type, energy_type, model_path,
 
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == '__main__':
-    # --- Parameters for the models you want to train ---
-    TARGET_CENTER_ID = "aoi_gurugram" 
+    # --- List all hospital IDs you want to process ---
+    HOSPITAL_IDS_TO_PROCESS = [
+        "aoi_gurugram",
+        "medanta_gurugram",
+        "fortis_delhi",
+        "apollo_chennai",
+        "max_delhi"
+    ]
+    
     TARGET_DATA_TYPE = "output"
     ENERGY_TYPES_TO_TRAIN = [
         "6X", "10X", "15X", "6X FFF", "10X FFF", "6E", 
         "9E", "12E", "15E", "18E"
     ]
 
-    print(f"--- Starting batch processing for {TARGET_CENTER_ID} - {TARGET_DATA_TYPE} ---")
-
-    for energy in ENERGY_TYPES_TO_TRAIN:
-        print(f"\n--- Processing Energy: {energy} ---")
-        historical_df = fetch_historical_data(TARGET_CENTER_ID, TARGET_DATA_TYPE, energy)
+    for hospital_id in HOSPITAL_IDS_TO_PROCESS:
+        print(f"\n\n========================================================")
+        print(f"--- Starting batch processing for HOSPITAL: {hospital_id} ---")
+        print(f"========================================================")
         
-        if not historical_df.empty:
-            if not os.path.exists('models'):
-                os.makedirs('models')
-            model_filename = f"models/model_{TARGET_CENTER_ID}_{TARGET_DATA_TYPE}_{energy}.pkl"
+        for energy in ENERGY_TYPES_TO_TRAIN:
+            print(f"\n--- Processing Energy: {energy} ---")
             
-            # 1. Train and get the last date from the training data
-            trained_model, last_known_date = train_and_save_model(historical_df, model_filename)
+            # This line has been corrected
+            historical_df = fetch_historical_data(hospital_id, TARGET_DATA_TYPE, energy)
+            
+            if not historical_df.empty:
+                if not os.path.exists('models'):
+                    os.makedirs('models')
+                model_filename = f"models/model_{hospital_id}_{TARGET_DATA_TYPE}_{energy}.pkl"
+                
+                trained_model, last_known_date = train_and_save_model(historical_df, model_filename)
 
-            # 2. If training was successful, generate predictions
-            if trained_model and last_known_date:
-                generate_and_save_predictions(TARGET_CENTER_ID, TARGET_DATA_TYPE, energy, model_filename, last_known_date)
+                if trained_model and last_known_date:
+                    generate_and_save_predictions(hospital_id, TARGET_DATA_TYPE, energy, model_filename, last_known_date)
     
-    print("\n--- Batch processing complete. ---")
+    print("\n\n--- All hospitals processed. Batch complete. ---")

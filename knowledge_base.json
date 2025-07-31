@@ -1,0 +1,29 @@
+{
+  "troubleshooting": {
+    "output drift positive": {
+      "initial_question": "I see the output is trending high. Was there a recent machine service?",
+      "answers": {
+        "yes": "Post-service drift is common. Please verify temperature and pressure corrections. If the trend continues for 3+ days, a baseline recalibration might be needed.",
+        "no": "Understood. Please check for environmental changes. Have you verified the temperature and pressure of the chamber water? Significant changes can cause output drift."
+      }
+    },
+    "flatness warning": {
+      "initial_question": "A flatness value is in the warning range. Is this issue occurring on a specific axis?",
+      "answers": {
+        "inline": "Inline flatness issues often point to a problem with the steering coils. Please check the coil currents and log the values.",
+        "crossline": "Crossline flatness issues can be related to the bending magnet. Check the bending magnet current and log the value for the service engineer."
+      }
+    }
+  },
+  "maintenance_info": {
+    "mlc service": "Regular Multi-leaf Collimator (MLC) service is recommended every 6 months. This includes cleaning the leaves and performing a positional accuracy test.",
+    "chamber check": "The ion chamber should be checked for drift and leakage currents annually or if inconsistent readings are observed."
+  },
+  "keywords": {
+    "service": "maintenance_info.mlc_service",
+    "mlc": "maintenance_info.mlc_service",
+    "chamber": "maintenance_info.chamber_check",
+    "drift": "troubleshooting.output_drift_positive.answers.no",
+    "flatness": "troubleshooting.flatness_warning.initial_question"
+  }
+}

@@ -466,74 +466,107 @@ def send_alert():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-# --- CHATBOT (Updated with Knowledge Base) ---
+# --- [UPDATED] CHATBOT / DIAGNOSTICS ---
 @app.route('/query-qa-data', methods=['POST'])
 def query_qa_data():
     try:
         content = request.get_json(force=True)
         user_query_text = content.get("query_text", "").lower()
-        month_param = content.get("month")
-        uid = content.get("uid")
 
-        if not user_query_text or not month_param or not uid:
-            return jsonify({'status': 'error', 'message': 'Missing query text, month, or UID'}), 400
+        with open('knowledge_base.json', 'r') as f:
+            kb = json.load(f)
 
-        # --- NEW: Load the Knowledge Base ---
-        try:
-            with open('knowledge_base.json', 'r') as f:
-                kb = json.load(f)
-        except FileNotFoundError:
-            kb = {}
-            app.logger.error("knowledge_base.json not found!")
+        # Check for diagnostic keywords
+        if 'drift' in user_query_text or 'output' in user_query_text:
+            topic = 'output_drift'
+        elif 'flatness' in user_query_text or 'symmetry' in user_query_text:
+            topic = 'flatness_warning'
+        else:
+            # Fallback for simple maintenance questions
+            for keyword, path in kb.get("maintenance_info", {}).items():
+                 if keyword.replace("_", " ") in user_query_text:
+                     return jsonify({'status': 'success', 'message': path}), 200
+            return jsonify({'status': 'error', 'message': "I can help diagnose issues with 'output drift' or 'flatness'. What would you like to diagnose?"}), 404
 
-        # --- NEW: Check for keywords from the knowledge base ---
-        for keyword, path in kb.get("keywords", {}).items():
-            if keyword in user_query_text:
-                path_parts = path.split('.')
-                answer = kb
-                for part in path_parts:
-                    answer = answer.get(part, {})
-                if isinstance(answer, str):
-                    return jsonify({'status': 'success', 'message': answer}), 200
+        # Start the diagnostic flow
+        troubleshooting_flow = kb.get("troubleshooting", {}).get(topic)
+        if not troubleshooting_flow:
+            return jsonify({'status': 'error', 'message': "I can't find a diagnostic flow for that topic."}), 404
 
-        # --- OLD: If no keyword is found, perform data analysis as before ---
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists: return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-        if not center_id: return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
-        
-        data_type_context = content.get("dataType", "output")
-        query_data_type = data_type_context
-        if 'flatness' in user_query_text: query_data_type = 'flatness'
-        elif 'inline' in user_query_text: query_data_type = 'inline'
-        elif 'crossline' in user_query_text: query_data_type = 'crossline'
-        elif 'output' in user_query_text: query_data_type = 'output'
-        
-        config = DATA_TYPE_CONFIGS[query_data_type]
-        tolerance_threshold = config["tolerance"]
-        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
-        data_rows = doc.to_dict().get(f"data_{query_data_type}", []) if doc.exists else []
-        year, mon = map(int, month_param.split("-"))
-        date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
-        
-        if "out of tolerance" in user_query_text:
-            out_dates = set()
-            for row in data_rows:
-                for i, value in enumerate(row.get("values", [])):
-                    try:
-                        if abs(float(value)) > tolerance_threshold: out_dates.add(date_strings[i])
-                    except (ValueError, TypeError): pass
-            msg = f"Out of tolerance dates for {query_data_type.title()}: {', '.join(sorted(list(out_dates))) if out_dates else 'None.'}"
-            return jsonify({'status': 'success', 'message': msg}), 200
-        
-        return jsonify({'status': 'error', 'message': "I'm sorry, I can't answer that yet. Try asking about 'out of tolerance' or keywords like 'MLC service' or 'flatness'."}), 501
+        start_node_id = troubleshooting_flow.get('start_node')
+        start_node = troubleshooting_flow.get('nodes', {}).get(start_node_id)
+
+        if not start_node:
+            return jsonify({'status': 'error', 'message': "Could not start the diagnostic flow."}), 500
+
+        return jsonify({
+            'status': 'diagnostic_start',
+            'topic': topic,
+            'node_id': start_node_id,
+            'question': start_node.get('question'),
+            'options': start_node.get('options', [])
+        }), 200
 
     except Exception as e:
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- [NEW] DIAGNOSE STEP ENDPOINT ---
+@app.route('/diagnose-step', methods=['POST'])
+def diagnose_step():
+    try:
+        content = request.get_json(force=True)
+        topic = content.get("topic")
+        current_node_id = content.get("node_id")
+        answer = content.get("answer")
+
+        if not all([topic, current_node_id, answer]):
+            return jsonify({'status': 'error', 'message': 'Missing topic, node_id, or answer'}), 400
+
+        with open('knowledge_base.json', 'r') as f:
+            kb = json.load(f)
+
+        flow = kb.get("troubleshooting", {}).get(topic)
+        if not flow:
+            return jsonify({'status': 'error', 'message': 'Invalid topic'}), 404
+
+        current_node = flow.get("nodes", {}).get(current_node_id)
+        if not current_node:
+            return jsonify({'status': 'error', 'message': 'Invalid node ID'}), 404
         
+        next_node_id = current_node.get("answers", {}).get(answer)
+        if not next_node_id:
+            return jsonify({'status': 'error', 'message': 'Invalid answer for this node'}), 404
+            
+        next_node = flow.get("nodes", {}).get(next_node_id)
+        if not next_node:
+            return jsonify({'status': 'error', 'message': 'Next node not found in knowledge base'}), 500
+
+        # Check if this is a final diagnosis or another question
+        if "diagnosis" in next_node:
+            return jsonify({
+                'status': 'diagnostic_end',
+                'diagnosis': next_node.get('diagnosis')
+            }), 200
+        elif "question" in next_node:
+            return jsonify({
+                'status': 'diagnostic_continue',
+                'topic': topic,
+                'node_id': next_node_id,
+                'question': next_node.get('question'),
+                'options': next_node.get('options', [])
+            }), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Could not determine next step.'}), 500
+
+    except Exception as e:
+        app.logger.error(f"Diagnose step failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 # --- NEW PREDICTIONS ENDPOINT ---
 @app.route('/predictions', methods=['GET'])
 def get_predictions():
@@ -750,7 +783,7 @@ def delete_user():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
-# --- [NEW] ADMIN ROUTE FOR HOSPITAL DATA ---
+# --- ADMIN ROUTE FOR HOSPITAL DATA ---
 @app.route('/admin/hospital-data', methods=['GET'])
 def get_hospital_data():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -793,7 +826,7 @@ def get_hospital_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- [NEW] ADMIN ROUTE FOR AUDIT LOGS ---
+# --- ADMIN ROUTE FOR AUDIT LOGS ---
 @app.route('/admin/audit-logs', methods=['GET'])
 def get_audit_logs():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]

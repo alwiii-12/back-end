@@ -423,7 +423,6 @@ def send_alert():
 
         app.logger.info("Step 5: RSO emails found. Proceeding to send notification.")
         
-        # --- Original function logic continues here ---
         current_out_values = content.get("outValues", [])
         hospital = content.get("hospitalName", "Unknown")
         month_key = content.get("month")
@@ -467,43 +466,57 @@ def send_alert():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-# --- CHATBOT ---
+# --- CHATBOT (Updated with Knowledge Base) ---
 @app.route('/query-qa-data', methods=['POST'])
 def query_qa_data():
     try:
         content = request.get_json(force=True)
-        user_query_text = content.get("query_text", "")
+        user_query_text = content.get("query_text", "").lower()
         month_param = content.get("month")
         uid = content.get("uid")
-        data_type_context = content.get("dataType", "output")
 
         if not user_query_text or not month_param or not uid:
             return jsonify({'status': 'error', 'message': 'Missing query text, month, or UID'}), 400
 
+        # --- NEW: Load the Knowledge Base ---
+        try:
+            with open('knowledge_base.json', 'r') as f:
+                kb = json.load(f)
+        except FileNotFoundError:
+            kb = {}
+            app.logger.error("knowledge_base.json not found!")
+
+        # --- NEW: Check for keywords from the knowledge base ---
+        for keyword, path in kb.get("keywords", {}).items():
+            if keyword in user_query_text:
+                path_parts = path.split('.')
+                answer = kb
+                for part in path_parts:
+                    answer = answer.get(part, {})
+                if isinstance(answer, str):
+                    return jsonify({'status': 'success', 'message': answer}), 200
+
+        # --- OLD: If no keyword is found, perform data analysis as before ---
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists: return jsonify({'status': 'error', 'message': 'User not found'}), 404
         center_id = user_doc.to_dict().get("centerId")
         if not center_id: return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
         
-        lower_case_query = user_query_text.lower()
-        
+        data_type_context = content.get("dataType", "output")
         query_data_type = data_type_context
-        if 'flatness' in lower_case_query: query_data_type = 'flatness'
-        elif 'inline' in lower_case_query: query_data_type = 'inline'
-        elif 'crossline' in lower_case_query: query_data_type = 'crossline'
-        elif 'output' in lower_case_query: query_data_type = 'output'
+        if 'flatness' in user_query_text: query_data_type = 'flatness'
+        elif 'inline' in user_query_text: query_data_type = 'inline'
+        elif 'crossline' in user_query_text: query_data_type = 'crossline'
+        elif 'output' in user_query_text: query_data_type = 'output'
         
         config = DATA_TYPE_CONFIGS[query_data_type]
-        warning_threshold = config["warning"]
         tolerance_threshold = config["tolerance"]
-
         doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
         data_rows = doc.to_dict().get(f"data_{query_data_type}", []) if doc.exists else []
-
         year, mon = map(int, month_param.split("-"))
         date_strings = [f"{year}-{str(mon).zfill(2)}-{str(i+1).zfill(2)}" for i in range(monthrange(year, mon)[1])]
         
-        if "out of tolerance" in lower_case_query:
+        if "out of tolerance" in user_query_text:
             out_dates = set()
             for row in data_rows:
                 for i, value in enumerate(row.get("values", [])):
@@ -512,26 +525,47 @@ def query_qa_data():
                     except (ValueError, TypeError): pass
             msg = f"Out of tolerance dates for {query_data_type.title()}: {', '.join(sorted(list(out_dates))) if out_dates else 'None.'}"
             return jsonify({'status': 'success', 'message': msg}), 200
-
-        if "warning values" in lower_case_query:
-            warnings = []
-            for row in data_rows:
-                for i, value in enumerate(row.get("values", [])):
-                    try:
-                        val_float = float(value)
-                        if warning_threshold < abs(val_float) <= tolerance_threshold:
-                            warnings.append(f"{row.get('energy')} on {date_strings[i]}: {val_float}%")
-                    except (ValueError, TypeError): pass
-            msg = f"Warning values for {query_data_type.title()}: {'; '.join(warnings) if warnings else 'None.'}"
-            return jsonify({'status': 'success', 'message': msg}), 200
-
-        return jsonify({'status': 'error', 'message': f"I'm sorry, I can't answer that yet. Try asking about 'out of tolerance' or 'warning values' for {query_data_type.title()}."}), 501
+        
+        return jsonify({'status': 'error', 'message': "I'm sorry, I can't answer that yet. Try asking about 'out of tolerance' or keywords like 'MLC service' or 'flatness'."}), 501
 
     except Exception as e:
         app.logger.error(f"Chatbot query failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured: sentry_sdk.capture_exception(e)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+        
+# --- NEW PREDICTIONS ENDPOINT ---
+@app.route('/predictions', methods=['GET'])
+def get_predictions():
+    try:
+        uid = request.args.get('uid')
+        data_type = request.args.get('dataType')
+        energy = request.args.get('energy')
 
+        if not all([uid, data_type, energy]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+
+        if not center_id:
+            return jsonify({'error': 'User has no associated center'}), 400
+
+        prediction_doc_id = f"{center_id}_{data_type}_{energy}"
+        prediction_doc = db.collection("linac_predictions").document(prediction_doc_id).get()
+
+        if prediction_doc.exists:
+            return jsonify(prediction_doc.to_dict()), 200
+        else:
+            return jsonify({'error': 'Prediction not found'}), 404
+            
+    except Exception as e:
+        app.logger.error(f"Get predictions failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
 
 # --- ADMIN ROUTES ---
 @app.route('/admin/pending-users', methods=['GET'])
@@ -644,53 +678,32 @@ def update_user_status():
 
         if "status" in updates:
             audit_entry["changes"]["status"] = {"old": old_user_data.get("status"), "new": updates["status"]}
-            audit_entry["oldData"]["status"] = old_user_data.get("status")
-            audit_entry["newData"]["status"] = updates["status"]
         if "role" in updates:
             audit_entry["changes"]["role"] = {"old": old_user_data.get("role"), "new": updates["role"]}
-            audit_entry["oldData"]["role"] = old_user_data.get("role")
-            audit_entry["newData"]["role"] = updates["role"]
         if "hospital" in updates:
             audit_entry["changes"]["hospital"] = {"old": old_user_data.get("hospital"), "new": updates["hospital"]}
-            audit_entry["oldData"]["hospital"] = old_user_data.get("hospital")
-            audit_entry["newData"]["hospital"] = updates["hospital"]
         
-        audit_entry["targetUserEmail"] = old_user_data.get("email", "N/A")
-        audit_entry["targetUserName"] = old_user_data.get("name", "N/A")
-
         db.collection("audit_logs").add(audit_entry)
         app.logger.info(f"Audit: User {uid} updated by {requesting_admin_uid}")
 
         updated_user_data = ref.get().to_dict()
         if updated_user_data.get("email"):
             subject = "LINAC QA Account Update"
-            body = f"Your LINAC QA account details have been updated."
-            
+            body = "Your LINAC QA account details have been updated."
             if "status" in updates:
-                status_text = updates["status"].upper()
-                body += f"\nYour account status is now: {status_text}."
-                if status_text == "ACTIVE":
-                    body += " You can now log in and use the portal."
-                elif status_text == "REJECTED":
-                    body += " Please contact support for more information."
-            
+                body += f"\nYour account status is now: {updates['status'].upper()}."
             if "role" in updates:
                  body += f"\nYour role has been updated to: {updates['role']}."
             if "hospital" in updates:
                  body += f"\nYour hospital has been updated to: {updates['hospital']}."
-
             send_notification_email(updated_user_data["email"], subject, body)
-        else:
-            app.logger.warning(f"No email for user {uid} found to send update notification.")
-            if sentry_sdk_configured:
-                sentry_sdk.capture_message(f"No email for user {uid} found to send update notification.", level="warning")
 
         return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
     except Exception as e:
-        app.logger.error(f"Error updating user status/role/hospital: {str(e)}", exc_info=True)
+        app.logger.error(f"Error updating user: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
+        return jsonify({'message': str(e)}), 500
 
 @app.route('/admin/delete-user', methods=['DELETE'])
 def delete_user():
@@ -708,38 +721,23 @@ def delete_user():
             return jsonify({'message': 'Missing UID for deletion'}), 400
 
         user_doc_ref = db.collection("users").document(uid_to_delete)
-        user_doc = user_doc_ref.get()
-        user_data_to_log = user_doc.to_dict() if user_doc.exists else {}
+        user_data_to_log = user_doc_ref.get().to_dict() or {}
 
         try:
             auth.delete_user(uid_to_delete)
-            app.logger.info(f"Firebase Auth user {uid_to_delete} deleted.")
         except Exception as e:
-            if "User record not found" in str(e):
-                app.logger.warning(f"Firebase Auth user {uid_to_delete} not found, proceeding with Firestore deletion.")
-                if sentry_sdk_configured:
-                    sentry_sdk.capture_message(f"Firebase Auth user {uid_to_delete} not found during deletion attempt.", level="warning")
-            else:
+            if "User record not found" not in str(e):
                 app.logger.error(f"Error deleting Firebase Auth user {uid_to_delete}: {str(e)}", exc_info=True)
-                if sentry_sdk_configured:
-                    sentry_sdk.capture_exception(e)
                 return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
 
-        if user_doc.exists:
-            user_doc_ref.delete()
-            app.logger.info(f"Firestore user document {uid_to_delete} ({user_data_to_log.get('email')}) deleted.")
-        else:
-            app.logger.warning(f"Firestore user document {uid_to_delete} not found (already deleted?).")
-            if sentry_sdk_configured:
-                sentry_sdk.capture_message(f"Firestore user document {uid_to_delete} not found during deletion attempt.", level="warning")
+        user_doc_ref.delete()
         
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
             "adminUid": requesting_admin_uid,
             "action": "user_deletion",
             "targetUserUid": uid_to_delete,
-            "deletedUserData": user_data_to_log,
-            "hospital": user_data_to_log.get("hospital", "N/A").lower().replace(" ", "_")
+            "deletedUserData": user_data_to_log
         }
         db.collection("audit_logs").add(audit_entry)
         app.logger.info(f"Audit: User {uid_to_delete} deleted by {requesting_admin_uid}")
@@ -752,315 +750,10 @@ def delete_user():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
-@app.route('/admin/hospital-data', methods=['GET', 'OPTIONS'])
-def get_hospital_qa_data():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
-    hospital_id = request.args.get('hospitalId')
-    month_param = request.args.get('month')
-
-    if not hospital_id or not month_param:
-        return jsonify({'message': 'Missing hospitalId or month parameter'}), 400
-
-    try:
-        year, mon = map(int, month_param.split("-"))
-        _, num_days = monthrange(year, mon)
-
-        doc_ref = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}")
-        doc_snap = doc_ref.get()
-
-        all_data_tables = {}
-        
-        firestore_data = doc_snap.to_dict() if doc_snap.exists else {}
-
-        for data_type in DATA_TYPES:
-            field_name = f"data_{data_type}"
-            energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
-            
-            if field_name in firestore_data:
-                for row in firestore_data[field_name]:
-                    energy = row.get("energy")
-                    values = row.get("values", [])
-                    if energy in energy_dict:
-                        energy_dict[energy] = (values + [""] * num_days)[:num_days]
-            
-            all_data_tables[data_type] = [[e] + energy_dict[e] for e in ENERGY_TYPES]
-
-        return jsonify({'status': 'success', 'data': all_data_tables}), 200
-    except Exception as e:
-        app.logger.error(f"Error fetching hospital QA data for admin: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'error': f"Failed to fetch data: {str(e)}"}), 500
-
-@app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
-def get_audit_logs():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
-    hospital_filter = request.args.get('hospitalId')
-    date_filter_str = request.args.get('date')
-    action_filter = request.args.get('action')
-
-    try:
-        logs_query = db.collection("audit_logs")
-        
-        user_timezone = pytz.timezone('Asia/Kolkata')
-        utc_timezone = pytz.utc
-
-        if date_filter_str:
-            start_of_day_naive = datetime.strptime(date_filter_str, "%Y-%m-%d")
-            start_of_day_local = user_timezone.localize(start_of_day_naive)
-            end_of_day_local = start_of_day_local + timedelta(days=1)
-            start_of_day_utc = start_of_day_local.astimezone(utc_timezone)
-            end_of_day_utc = end_of_day_local.astimezone(utc_timezone)
-            
-            logs_query = logs_query.where('timestamp', '>=', start_of_day_utc)
-            logs_query = logs_query.where('timestamp', '<', end_of_day_utc)
-
-        if action_filter:
-            logs_query = logs_query.where('action', '==', action_filter)
-
-        logs_query = logs_query.order_by('timestamp', direction=firestore.Query.DESCENDING)
-        
-        all_logs_from_db = [doc.to_dict() for doc in logs_query.stream()]
-        
-        filtered_logs = []
-        for log_data in all_logs_from_db:
-            if hospital_filter:
-                log_hospital = log_data.get('hospital', '').lower().replace(" ", "_")
-                if log_hospital != hospital_filter:
-                    continue
-
-            if 'timestamp' in log_data and log_data['timestamp'] is not None:
-                utc_dt = log_data['timestamp'].astimezone(utc_timezone)
-                ist_dt = utc_dt.astimezone(user_timezone)
-                log_data['timestamp'] = ist_dt.strftime("%d/%m/%Y, %I:%M:%S %p")
-            else:
-                log_data['timestamp'] = 'No Timestamp'
-            
-            if 'targetUserName' in log_data:
-                log_data['user_display'] = f"{log_data['targetUserName']} ({log_data.get('targetUserEmail', 'N/A')})"
-            elif 'userEmail' in log_data:
-                log_data['user_display'] = log_data['userEmail']
-            else:
-                log_data['user_display'] = 'N/A'
-            filtered_logs.append(log_data)
-
-        return jsonify({'status': 'success', 'logs': filtered_logs}), 200
-    except Exception as e:
-        app.logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
-        if SENTRY_DSN: sentry_sdk.capture_exception(e)
-        return jsonify({'message': f"Failed to fetch audit logs: {str(e)}"}), 500
-
-# --- EXCEL EXPORT ---
-@app.route('/export-excel', methods=['POST'])
-def export_excel():
-    try:
-        content = request.get_json(force=True)
-        uid = content.get("uid")
-        month_param = content.get("month")
-        data_type = content.get("dataType")
-
-        if not uid or not month_param:
-            return jsonify({'error': 'Missing UID or month parameter'}), 400
-        if not data_type or data_type not in DATA_TYPES:
-            return jsonify({'error': 'Invalid or missing dataType'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 404
-        user_data = user_doc.to_dict()
-        center_id = user_data.get("centerId")
-
-        if not center_id:
-            return jsonify({'error': 'Missing centerId'}), 400
-
-        year, mon = map(int, month_param.split("-"))
-        _, num_days = monthrange(year, mon)
-        energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
-
-        firestore_field_name = f"data_{data_type}"
-        doc = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
-        
-        if doc.exists:
-            doc_data = doc.to_dict().get(firestore_field_name, [])
-            for row in doc_data:
-                energy, values = row.get("energy"), row.get("values", [])
-                if energy in energy_dict:
-                    energy_dict[energy] = (values + [""] * num_days)[:num_days]
-        
-        data_for_df = []
-        columns = ['Energy']
-        for i in range(1, num_days + 1):
-            columns.append(f"{year}-{str(mon).zfill(2)}-{str(i).zfill(2)}")
-
-        for energy_type in ENERGY_TYPES:
-            row_data = [energy_type] + energy_dict[energy_type]
-            data_for_df.append(row_data)
-
-        df = pd.DataFrame(data_for_df, columns=columns)
-
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            sheet_name = data_type.title() + ' Data'
-            df.to_excel(writer, index=False, sheet_name=sheet_name)
-        output.seek(0)
-
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            download_name=f'LINAC_QA_{data_type.upper()}_{month_param}.xlsx',
-            as_attachment=True
-        )
-
-    except Exception as e:
-        app.logger.error(f"Error exporting Excel file: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'error': f"Failed to export Excel file: {str(e)}"}), 500
-
-
-# --- ANNOTATIONS ---
-@app.route('/annotations', methods=['GET'])
-def get_annotations():
-    try:
-        month_param = request.args.get('month')
-        data_type = request.args.get('dataType')
-        uid = request.args.get('uid')
-        if not all([month_param, data_type, uid]): return jsonify({'error': 'Missing parameters'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists: return jsonify({'error': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-        if not center_id: return jsonify({'error': 'Missing centerId'}), 400
-
-        annotations_ref = db.collection("linac_annotations").document(center_id).collection("months").document(f"Month_{month_param}")
-        doc = annotations_ref.get()
-        if doc.exists:
-            all_annotations = doc.to_dict()
-            type_annotations = {k: v for k, v in all_annotations.items() if v.get('dataType') == data_type}
-            return jsonify(type_annotations), 200
-        else:
-            return jsonify({}), 200
-    except Exception as e:
-        app.logger.error(f"Get annotations failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN: sentry_sdk.capture_exception(e)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/save-annotation', methods=['POST'])
-def save_annotation():
-    try:
-        content = request.get_json(force=True)
-        uid, month_param, key, data = content.get("uid"), content.get("month"), content.get("key"), content.get("data")
-        if not all([uid, month_param, key, data]): return jsonify({'status': 'error', 'message': 'Missing data'}), 400
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists: return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-        if not center_id: return jsonify({'status': 'error', 'message': 'Missing centerId'}), 400
-
-        doc_ref = db.collection("linac_annotations").document(center_id).collection("months").document(f"Month_{month_param}")
-        doc_ref.set({key: data}, merge=True)
-        return jsonify({'status': 'success'}), 200
-    except Exception as e:
-        app.logger.error(f"Save annotation failed: {str(e)}", exc_info=True)
-        if SENTRY_DSN: sentry_sdk.capture_exception(e)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/delete-annotation', methods=['POST', 'OPTIONS'])
-def delete_annotation():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    try:
-        content = request.get_json(force=True)
-        uid, month_param, key = content.get("uid"), content.get("month"), content.get("key")
-        
-        if not all([uid, month_param, key]):
-            return jsonify({'status': 'error', 'message': 'Missing data for deletion'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        
-        center_id = user_doc.to_dict().get("centerId")
-        if not center_id:
-            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
-
-        doc_ref = db.collection("linac_annotations").document(center_id).collection("months").document(f"Month_{month_param}")
-        
-        doc_ref.update({
-            key: firestore.DELETE_FIELD
-        })
-        
-        app.logger.info(f"Annotation '{key}' deleted for center '{center_id}' in month '{month_param}'.")
-        return jsonify({'status': 'success', 'message': 'Annotation deleted successfully'}), 200
-
-    except Exception as e:
-        app.logger.error(f"Delete annotation failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-        
-@app.route("/debug-sentry")
-def trigger_error():
-    division_by_zero = 1 / 0
-    return "Hello, world!"
-    
-# --- NEW PREDICTIONS ENDPOINT ---
-@app.route('/predictions', methods=['GET'])
-def get_predictions():
-    try:
-        # 1. Get parameters from the frontend request
-        uid = request.args.get('uid')
-        data_type = request.args.get('dataType')
-        energy = request.args.get('energy')
-
-        if not all([uid, data_type, energy]):
-            return jsonify({'error': 'Missing required parameters'}), 400
-
-        # 2. Get the user's centerId to find the correct document
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-
-        if not center_id:
-            return jsonify({'error': 'User has no associated center'}), 400
-
-        # 3. Fetch the specific prediction document from Firestore
-        prediction_doc_id = f"{center_id}_{data_type}_{energy}"
-        prediction_doc = db.collection("linac_predictions").document(prediction_doc_id).get()
-
-        if prediction_doc.exists:
-            # 4. If found, return the prediction data
-            return jsonify(prediction_doc.to_dict()), 200
-        else:
-            # 5. If not found, return an error
-            return jsonify({'error': 'Prediction not found'}), 404
-            
-    except Exception as e:
-        app.logger.error(f"Get predictions failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'error': str(e)}), 500
-
-# --- INDEX ---
+# --- INDEX AND RUN ---
 @app.route('/')
 def index():
     return "✅ LINAC QA Backend Running"
 
-# --- RUN ---
 if __name__ == '__main__':
     app.run(debug=True)

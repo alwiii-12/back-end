@@ -750,6 +750,107 @@ def delete_user():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
+# --- [NEW] ADMIN ROUTE FOR HOSPITAL DATA ---
+@app.route('/admin/hospital-data', methods=['GET'])
+def get_hospital_data():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        hospital_id = request.args.get('hospitalId')
+        month_param = request.args.get('month')
+        if not hospital_id or not month_param:
+            return jsonify({'error': 'Missing hospitalId or month parameter'}), 400
+
+        center_id = hospital_id
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        
+        all_data = {}
+        for data_type in DATA_TYPES:
+            doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
+            doc = doc_ref.get()
+            
+            energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+            if doc.exists:
+                firestore_field_name = f"data_{data_type}"
+                doc_data = doc.to_dict().get(firestore_field_name, [])
+                for row in doc_data:
+                    energy, values = row.get("energy"), row.get("values", [])
+                    if energy in energy_dict:
+                        energy_dict[energy] = (values + [""] * num_days)[:num_days]
+
+            table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
+            all_data[data_type] = table
+
+        return jsonify({'data': all_data}), 200
+
+    except Exception as e:
+        app.logger.error(f"Admin get hospital data failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
+# --- [NEW] ADMIN ROUTE FOR AUDIT LOGS ---
+@app.route('/admin/audit-logs', methods=['GET'])
+def get_audit_logs():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        logs_query = db.collection("audit_logs").order_by("timestamp", direction=firestore.Query.DESCENDING)
+
+        hospital_id = request.args.get('hospitalId')
+        action = request.args.get('action')
+        date_str = request.args.get('date')
+
+        if hospital_id:
+            logs_query = logs_query.where('hospital', '==', hospital_id)
+        if action:
+            logs_query = logs_query.where('action', '==', action)
+        if date_str:
+            start_dt = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=pytz.UTC)
+            end_dt = start_dt + timedelta(days=1)
+            logs_query = logs_query.where('timestamp', '>=', start_dt).where('timestamp', '<', end_dt)
+        
+        logs_query = logs_query.limit(200)
+        logs_snapshot = logs_query.stream()
+
+        logs = []
+        user_cache = {}
+        for doc in logs_snapshot:
+            log_data = doc.to_dict()
+            if 'timestamp' in log_data and isinstance(log_data['timestamp'], datetime):
+                log_data['timestamp'] = log_data['timestamp'].astimezone(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
+            
+            user_uid = log_data.get('userUid') or log_data.get('adminUid') or log_data.get('targetUserUid')
+            if user_uid:
+                if user_uid in user_cache:
+                    log_data['user_display'] = user_cache[user_uid]
+                else:
+                    user_doc = db.collection('users').document(user_uid).get()
+                    if user_doc.exists:
+                        user_name = user_doc.to_dict().get('name', user_uid)
+                        log_data['user_display'] = user_name
+                        user_cache[user_uid] = user_name
+                    else:
+                        log_data['user_display'] = user_uid
+                        user_cache[user_uid] = user_uid
+            
+            logs.append(log_data)
+        
+        return jsonify({"logs": logs}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error loading audit logs: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
 # --- INDEX AND RUN ---
 @app.route('/')
 def index():

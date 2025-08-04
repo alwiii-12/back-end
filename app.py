@@ -62,6 +62,7 @@ CORS(app, resources={r"/*": {"origins": origins}})
 app.logger.setLevel(logging.DEBUG)
 
 # --- [EMAIL CONFIG] ---
+SENTRY_DSN = os.environ.get("SENTRY_DSN")
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
@@ -168,18 +169,15 @@ def save_annotation():
         if not all([uid, month, key, data]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
-        # Save the regular annotation text
         annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
         annotation_ref.set(data)
 
-        # [NEW] Handle the service event logic
         is_service_event = data.get('isServiceEvent', False)
         event_date = data.get('eventDate')
         
         if event_date:
             service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
             if is_service_event:
-                # If checkbox is checked, save the event
                 service_event_ref.set({
                     'description': data.get('text', 'Service/Calibration'),
                     'energy': data.get('energy'),
@@ -187,7 +185,6 @@ def save_annotation():
                 })
                 app.logger.info(f"Service event marked for user {uid} on date {event_date}")
             else:
-                # If checkbox is unchecked, delete any existing event for that date
                 service_event_ref.delete()
                 app.logger.info(f"Service event unmarked for user {uid} on date {event_date}")
 
@@ -209,12 +206,10 @@ def delete_annotation():
         if not all([uid, month, key]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
         
-        # Delete the regular annotation
         annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
         annotation_ref.delete()
 
-        # [NEW] Also delete any associated service event
-        event_date = key.split('-', 1)[1] # Extract date from the key like "6X-2023-08-15"
+        event_date = key.split('-', 1)[1]
         if event_date:
             service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
             service_event_ref.delete()
@@ -672,6 +667,114 @@ def get_predictions():
             
     except Exception as e:
         app.logger.error(f"Get predictions failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
+# --- [NEW] DASHBOARD SUMMARY ENDPOINT ---
+@app.route('/dashboard-summary', methods=['GET'])
+def dashboard_summary():
+    try:
+        id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        decoded_token = auth.verify_id_token(id_token)
+        uid = decoded_token['uid']
+        user_doc = db.collection('users').document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 403
+        
+        user_data = user_doc.to_dict()
+        role = user_data.get('role')
+        
+        summary = {}
+
+        if role == 'Admin':
+            # --- Admin Dashboard Logic ---
+            pending_users_snap = db.collection('users').where('status', '==', 'pending').stream()
+            summary['pending_users_count'] = len(list(pending_users_snap))
+            
+            hospitals_snap = db.collection('users').stream()
+            hospital_ids = sorted(list(set(u.to_dict().get('hospital') for u in hospitals_snap if u.to_dict().get('hospital'))))
+            
+            leaderboard = []
+            total_warnings = 0
+            total_oot = 0
+
+            for hospital_id in hospital_ids:
+                hospital_warnings = 0
+                hospital_oot = 0
+                # Simplified: Just check the current month for stats
+                month_key = datetime.now().strftime("Month_%Y-%m")
+                months_coll = db.collection('linac_data').document(hospital_id).collection('months')
+                month_doc = months_coll.document(month_key).get()
+                if month_doc.exists:
+                    month_data = month_doc.to_dict()
+                    for data_type, config in DATA_TYPE_CONFIGS.items():
+                        field_name = f"data_{data_type}"
+                        if field_name in month_data:
+                            for row in month_data[field_name]:
+                                for val_str in row.get('values', []):
+                                    try:
+                                        val = float(val_str)
+                                        if abs(val) > config['tolerance']:
+                                            hospital_oot += 1
+                                        elif abs(val) > config['warning']:
+                                            hospital_warnings += 1
+                                    except (ValueError, TypeError):
+                                        continue
+                leaderboard.append({'hospital': hospital_id, 'warnings': hospital_warnings, 'oot': hospital_oot})
+                total_warnings += hospital_warnings
+                total_oot += hospital_oot
+
+            summary['leaderboard'] = sorted(leaderboard, key=lambda x: x['oot'], reverse=True)
+            summary['total_warnings'] = total_warnings
+            summary['total_oot'] = total_oot
+            summary['role'] = 'Admin'
+
+        else:
+            # --- Regular User Dashboard Logic ---
+            center_id = user_data.get('centerId')
+            summary['role'] = user_data.get('role', 'User')
+            summary['hospital'] = center_id
+            
+            user_warnings = 0
+            user_oot = 0
+            machines_needing_attention = []
+
+            month_key = datetime.now().strftime("Month_%Y-%m")
+            month_doc = db.collection('linac_data').document(center_id).collection('months').document(month_key).get()
+            if month_doc.exists:
+                month_data = month_doc.to_dict()
+                for data_type, config in DATA_TYPE_CONFIGS.items():
+                    field_name = f"data_{data_type}"
+                    if field_name in month_data:
+                        for row in month_data[field_name]:
+                            energy = row.get('energy')
+                            values = [float(v) for v in row.get('values', []) if v]
+                            
+                            for val in values:
+                                if abs(val) > config['tolerance']:
+                                    user_oot += 1
+                                    attention_msg = f"{energy} {data_type.title()}: Had an out-of-tolerance reading this month."
+                                    if attention_msg not in machines_needing_attention:
+                                        machines_needing_attention.append(attention_msg)
+                                elif abs(val) > config['warning']:
+                                    user_warnings += 1
+            
+            summary['warnings'] = user_warnings
+            summary['oot'] = user_oot
+            summary['machines_needing_attention'] = machines_needing_attention
+            
+            service_events_snap = db.collection('service_events').document(uid).collection('events').order_by(firestore.Query.DESCENDING).limit(1).stream()
+            last_service_date = "Never"
+            for event in service_events_snap:
+                last_service_date = event.id
+            summary['last_service_date'] = last_service_date
+
+
+        return jsonify(summary), 200
+
+    except Exception as e:
+        app.logger.error(f"Dashboard summary failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500

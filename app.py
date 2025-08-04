@@ -567,16 +567,17 @@ def diagnose_step():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- NEW PREDICTIONS ENDPOINT ---
+# --- [UPDATED] PREDICTIONS ENDPOINT FOR MONTHLY FORECASTS ---
 @app.route('/predictions', methods=['GET'])
 def get_predictions():
     try:
         uid = request.args.get('uid')
         data_type = request.args.get('dataType')
         energy = request.args.get('energy')
+        month = request.args.get('month') # New parameter for month
 
-        if not all([uid, data_type, energy]):
-            return jsonify({'error': 'Missing required parameters'}), 400
+        if not all([uid, data_type, energy, month]):
+            return jsonify({'error': 'Missing required parameters (uid, dataType, energy, month)'}), 400
 
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
@@ -586,13 +587,15 @@ def get_predictions():
         if not center_id:
             return jsonify({'error': 'User has no associated center'}), 400
 
-        prediction_doc_id = f"{center_id}_{data_type}_{energy}"
+        # New document ID format includes the month
+        prediction_doc_id = f"{center_id}_{data_type}_{energy}_{month}"
         prediction_doc = db.collection("linac_predictions").document(prediction_doc_id).get()
 
         if prediction_doc.exists:
             return jsonify(prediction_doc.to_dict()), 200
         else:
-            return jsonify({'error': 'Prediction not found'}), 404
+            # Return a clear message if no forecast is found for this specific month
+            return jsonify({'error': f'Prediction not found for {month}'}), 404
             
     except Exception as e:
         app.logger.error(f"Get predictions failed: {str(e)}", exc_info=True)

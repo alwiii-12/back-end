@@ -27,23 +27,21 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- [CORRECTED] FUNCTION TO FETCH SERVICE EVENTS ---
-def fetch_service_events(center_id):
+# --- FUNCTION TO FETCH SERVICE EVENTS ---
+def fetch_service_events(hospital_id):
     """
-    Fetches all marked service/calibration dates for a specific center (hospital).
+    Fetches all marked service/calibration dates for a specific hospital.
     """
     events = []
-    # In your app's design, the user's centerId (e.g., 'aoi_gurugram') is used as the document ID
-    # for service events, but the actual UID is needed to find the user's document.
-    # We need to find the user associated with the center_id to get their UID.
-    users_ref = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
+    # Find the user UID associated with the hospital's centerId
+    users_ref = db.collection('users').where('centerId', '==', hospital_id).limit(1).stream()
     user_uid = None
     for user in users_ref:
         user_uid = user.id
         break
 
     if not user_uid:
-        print(f"No user found for centerId: {center_id}")
+        print(f"No user found for centerId: {hospital_id}, cannot fetch service events.")
         return None
 
     events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
@@ -94,9 +92,7 @@ def fetch_all_historical_data(center_id, data_type, energy_type):
         return pd.DataFrame(), []
 
     df = pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
-    
     unique_months = df['ds'].dt.strftime('%Y-%m').unique()
-    
     return df, unique_months
 
 # --- MODEL TRAINING & PREDICTION ---
@@ -109,12 +105,10 @@ def train_and_predict_for_month(full_df, month_to_forecast, service_events_df):
 
     if df_for_training.empty or len(df_for_training) < 10:
         print(f"Not enough data to train for month {month_to_forecast}. Skipping.")
-        return None, None
+        return None
 
     print(f"Training model for data up to {month_to_forecast}...")
-    
     model = Prophet(holidays=service_events_df)
-    
     model.fit(df_for_training)
     
     last_date_in_data = df_for_training['ds'].iloc[-1]
@@ -123,8 +117,7 @@ def train_and_predict_for_month(full_df, month_to_forecast, service_events_df):
 
     print(f"Generating 7-day forecast starting after {last_date_in_data.strftime('%Y-%m-%d')}...")
     forecast = model.predict(future_df)
-    
-    return forecast, last_date_in_data
+    return forecast
 
 # --- SAVE PREDICTION TO FIRESTORE ---
 def save_monthly_prediction(center_id, data_type, energy_type, month_key, forecast):
@@ -178,13 +171,13 @@ if __name__ == '__main__':
                 all_data_df, unique_months = fetch_all_historical_data(hospital_id, data_type, energy)
                 
                 if all_data_df.empty:
-                    print("No data found, skipping.")
+                    print(f"No data found for {energy}, skipping.")
                     continue
 
                 for month in unique_months:
                     print(f"\n--- Generating forecast for month: {month} ---")
                     
-                    forecast_df, last_date = train_and_predict_for_month(all_data_df, month, service_events)
+                    forecast_df = train_and_predict_for_month(all_data_df, month, service_events)
                     
                     if forecast_df is not None:
                         save_monthly_prediction(hospital_id, data_type, energy, month, forecast_df)

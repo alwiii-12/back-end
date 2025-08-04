@@ -1,24 +1,31 @@
 services:
+  # This is your existing web service that runs app.py
   - type: web
-    name: backend-results
+    name: backend-results # Use your actual backend service name
     env: python
     buildCommand: "./post_deploy.sh"
-    # Explicitly bind Gunicorn to the Render-provided $PORT
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     envVars:
-      # These variables should be set securely in the Render dashboard UI, NOT here.
-      # - key: SENTRY_DSN
-      #   value: This should be set in Render dashboard
-      # - key: SENDER_EMAIL
-      #   value: This should be set in Render dashboard
-      # - key: EMAIL_APP_PASSWORD
-      #   value: This should be set in Render dashboard
-      # - key: FIREBASE_CREDENTIALS
-      #   value: This should be set in Render dashboard
-
-      # Render automatically provides the PORT environment variable.
-      # You might explicitly define it here or in the dashboard for clarity, e.g.:
+      # IMPORTANT: Make sure your FIREBASE_CREDENTIALS and other secrets
+      # are set in the Render dashboard for this service.
       - key: PORT
-        value: 10000 # Render's default port.
-      
-      # REMOVED: SPACY_DATA environment variable.
+        value: 10000
+
+  # [NEW] This is the new Cron Job service to run the prediction script
+  - type: cron
+    name: predictive-model-trainer
+    env: python
+    # This schedule runs the job every day at 2:00 AM UTC (7:30 AM IST).
+    schedule: "0 2 * * *"
+    # The build command installs all the necessary python packages.
+    buildCommand: "pip install -r requirements.txt"
+    # The start command runs your prediction script.
+    startCommand: "python predictive_service.py"
+    envVars:
+      # This securely shares the Firebase credentials from your main web service
+      # with this cron job, so it can access the database.
+      - key: FIREBASE_CREDENTIALS
+        fromService:
+          type: web
+          name: backend-results # This MUST match the name of your web service above
+          envVarKey: FIREBASE_CREDENTIALS

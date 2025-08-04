@@ -455,6 +455,71 @@ def get_data():
         return jsonify({'error': str(e)}), 500
 
 
+# --- [NEW] EXPORT TO EXCEL ENDPOINT ---
+@app.route('/export-excel', methods=['POST'])
+def export_excel():
+    try:
+        content = request.get_json(force=True)
+        month_param = content.get("month")
+        uid = content.get("uid")
+        data_type = content.get("dataType")
+
+        if not all([month_param, uid, data_type]):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        
+        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            return jsonify({'error': 'No data found for the selected month'}), 404
+
+        firestore_field_name = f"data_{data_type}"
+        doc_data = doc.to_dict().get(firestore_field_name, [])
+        
+        if not doc_data:
+            return jsonify({'error': f'No data of type {data_type} found for the selected month'}), 404
+
+        # Convert to a format suitable for pandas DataFrame
+        data_for_df = {}
+        for row in doc_data:
+            energy = row.get("energy")
+            values = row.get("values", [])
+            data_for_df[energy] = pd.Series(values)
+
+        df = pd.DataFrame(data_for_df).T # Transpose to have energies as rows
+        
+        # Set column headers to be days of the month
+        df.columns = [f"Day {i+1}" for i in range(num_days)]
+        df.index.name = "Energy"
+
+        # Create an in-memory Excel file
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name=f'{data_type.title()} Data')
+        output.seek(0)
+        
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'LINAC_QA_{data_type.upper()}_{month_param}.xlsx'
+        )
+
+    except Exception as e:
+        app.logger.error(f"Export to Excel failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
+
 # --- ALERT EMAIL (with added logging) ---
 @app.route('/send-alert', methods=['POST'])
 def send_alert():

@@ -27,25 +27,27 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- [NEW] FUNCTION TO FETCH SERVICE EVENTS ---
-def fetch_service_events(center_id):
+# --- [CORRECTED] FUNCTION TO FETCH SERVICE EVENTS ---
+def fetch_service_events(hospital_id):
     """
-    Fetches all marked service/calibration dates for a specific user (center).
+    Fetches all marked service/calibration dates for a specific hospital.
+    The user's UID is the same as the hospital_id in this application's design.
     """
     events = []
-    events_ref = db.collection('service_events').document(center_id).collection('events').stream()
+    # The path was incorrect. It should be based on the hospital_id (which acts as the UID).
+    events_ref = db.collection('service_events').document(hospital_id).collection('events').stream()
     for event in events_ref:
-        events.append(event.id) # The document ID is the date string 'YYYY-MM-DD'
+        events.append(event.id) 
     
     if not events:
+        print("No service/calibration events found.")
         return None
 
-    # Format for Prophet holidays
     holidays_df = pd.DataFrame({
         'holiday': 'service_day',
         'ds': pd.to_datetime(events),
         'lower_window': 0,
-        'upper_window': 1, # Consider the event's effect on the day of and the day after
+        'upper_window': 1,
     })
     print(f"Found {len(events)} service/calibration events.")
     return holidays_df
@@ -100,7 +102,6 @@ def train_and_predict_for_month(full_df, month_to_forecast, service_events_df):
 
     print(f"Training model for data up to {month_to_forecast}...")
     
-    # [UPDATED] Pass the service events to the Prophet model
     model = Prophet(holidays=service_events_df)
     
     model.fit(df_for_training)
@@ -141,14 +142,22 @@ def save_monthly_prediction(center_id, data_type, energy_type, month_key, foreca
     })
     print(f"Successfully saved forecast for {month_key} to Firestore.")
 
-# --- MAIN EXECUTION BLOCK ---
+# --- MAIN EXECUTION BLOCK (PRODUCTION VERSION) ---
 if __name__ == '__main__':
-    HOSPITAL_IDS_TO_PROCESS = ["aoi_gurugram"]
-    DATA_TYPES_TO_PROCESS = ["output"]
-    ENERGY_TYPES_TO_PROCESS = ["6X"]
+    HOSPITAL_IDS_TO_PROCESS = [
+        "aoi_gurugram",
+        "medanta_gurugram",
+        "fortis_delhi",
+        "apollo_chennai",
+        "max_delhi"
+    ]
+    DATA_TYPES_TO_PROCESS = ["output", "flatness", "inline", "crossline"]
+    ENERGY_TYPES_TO_PROCESS = [
+        "6X", "10X", "15X", "6X FFF", "10X FFF", "6E", 
+        "9E", "12E", "15E", "18E"
+    ]
 
     for hospital_id in HOSPITAL_IDS_TO_PROCESS:
-        # [UPDATED] Fetch service events once per hospital
         service_events = fetch_service_events(hospital_id)
 
         for data_type in DATA_TYPES_TO_PROCESS:
@@ -164,7 +173,6 @@ if __name__ == '__main__':
                 for month in unique_months:
                     print(f"\n--- Generating forecast for month: {month} ---")
                     
-                    # Pass the fetched service events to the training function
                     forecast_df, last_date = train_and_predict_for_month(all_data_df, month, service_events)
                     
                     if forecast_df is not None:

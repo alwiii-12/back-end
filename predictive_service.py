@@ -28,14 +28,25 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # --- [CORRECTED] FUNCTION TO FETCH SERVICE EVENTS ---
-def fetch_service_events(hospital_id):
+def fetch_service_events(center_id):
     """
-    Fetches all marked service/calibration dates for a specific hospital.
-    The user's UID is the same as the hospital_id in this application's design.
+    Fetches all marked service/calibration dates for a specific center (hospital).
     """
     events = []
-    # The path was incorrect. It should be based on the hospital_id (which acts as the UID).
-    events_ref = db.collection('service_events').document(hospital_id).collection('events').stream()
+    # In your app's design, the user's centerId (e.g., 'aoi_gurugram') is used as the document ID
+    # for service events, but the actual UID is needed to find the user's document.
+    # We need to find the user associated with the center_id to get their UID.
+    users_ref = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
+    user_uid = None
+    for user in users_ref:
+        user_uid = user.id
+        break
+
+    if not user_uid:
+        print(f"No user found for centerId: {center_id}")
+        return None
+
+    events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
     for event in events_ref:
         events.append(event.id) 
     
@@ -49,7 +60,7 @@ def fetch_service_events(hospital_id):
         'lower_window': 0,
         'upper_window': 1,
     })
-    print(f"Found {len(events)} service/calibration events.")
+    print(f"Found {len(events)} service/calibration events for user {user_uid}.")
     return holidays_df
 
 # --- DATA FETCHING FUNCTION ---

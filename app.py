@@ -156,7 +156,7 @@ def verify_admin_token(id_token):
             sentry_sdk.capture_exception(e)
     return False, None
 
-# --- [NEW] ANNOTATION ENDPOINTS ---
+# --- ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
 def save_annotation():
     try:
@@ -671,7 +671,7 @@ def get_predictions():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- [NEW] DASHBOARD SUMMARY ENDPOINT ---
+# --- [UPDATED] DASHBOARD SUMMARY ENDPOINT ---
 @app.route('/dashboard-summary', methods=['GET'])
 def dashboard_summary():
     try:
@@ -686,6 +686,15 @@ def dashboard_summary():
         role = user_data.get('role')
         
         summary = {}
+
+        # --- [NEW] Accept month parameter for historical queries ---
+        month_param = request.args.get('month') # e.g., '2023-08'
+        if month_param:
+            month_key = f"Month_{month_param}"
+            summary['display_month'] = datetime.strptime(month_param, '%Y-%m').strftime('%B %Y')
+        else:
+            month_key = datetime.now().strftime("Month_%Y-%m")
+            summary['display_month'] = "This Month"
 
         if role == 'Admin':
             # --- Admin Dashboard Logic ---
@@ -702,8 +711,6 @@ def dashboard_summary():
             for hospital_id in hospital_ids:
                 hospital_warnings = 0
                 hospital_oot = 0
-                # Simplified: Just check the current month for stats
-                month_key = datetime.now().strftime("Month_%Y-%m")
                 months_coll = db.collection('linac_data').document(hospital_id).collection('months')
                 month_doc = months_coll.document(month_key).get()
                 if month_doc.exists:
@@ -740,7 +747,6 @@ def dashboard_summary():
             user_oot = 0
             machines_needing_attention = []
 
-            month_key = datetime.now().strftime("Month_%Y-%m")
             month_doc = db.collection('linac_data').document(center_id).collection('months').document(month_key).get()
             if month_doc.exists:
                 month_data = month_doc.to_dict()

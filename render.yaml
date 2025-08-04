@@ -11,12 +11,12 @@ services:
       - key: PORT
         value: 10000
 
-  # [NEW] This is the new Cron Job service to run the prediction script
+  # This is the Cron Job service to run the prediction script
   - type: cron
     name: predictive-model-trainer
     env: python
-    # This schedule runs the job every day at 2:00 AM UTC (7:30 AM IST).
-    schedule: "0 2 * * *"
+    # [UPDATED] This schedule now runs the job every day at 9:30 AM UTC (3:00 PM IST).
+    schedule: "30 9 * * *"
     # The build command installs all the necessary python packages.
     buildCommand: "pip install -r requirements.txt"
     # The start command runs your prediction script.

@@ -155,6 +155,79 @@ def verify_admin_token(id_token):
             sentry_sdk.capture_exception(e)
     return False, None
 
+# --- [NEW] ANNOTATION ENDPOINTS ---
+@app.route('/save-annotation', methods=['POST'])
+def save_annotation():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid")
+        month = content.get("month")
+        key = content.get("key")
+        data = content.get("data")
+
+        if not all([uid, month, key, data]):
+            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+
+        # Save the regular annotation text
+        annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
+        annotation_ref.set(data)
+
+        # [NEW] Handle the service event logic
+        is_service_event = data.get('isServiceEvent', False)
+        event_date = data.get('eventDate')
+        
+        if event_date:
+            service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
+            if is_service_event:
+                # If checkbox is checked, save the event
+                service_event_ref.set({
+                    'description': data.get('text', 'Service/Calibration'),
+                    'energy': data.get('energy'),
+                    'dataType': data.get('dataType')
+                })
+                app.logger.info(f"Service event marked for user {uid} on date {event_date}")
+            else:
+                # If checkbox is unchecked, delete any existing event for that date
+                service_event_ref.delete()
+                app.logger.info(f"Service event unmarked for user {uid} on date {event_date}")
+
+        return jsonify({'status': 'success', 'message': 'Annotation saved successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Save annotation failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/delete-annotation', methods=['POST'])
+def delete_annotation():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid")
+        month = content.get("month")
+        key = content.get("key")
+
+        if not all([uid, month, key]):
+            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+        
+        # Delete the regular annotation
+        annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
+        annotation_ref.delete()
+
+        # [NEW] Also delete any associated service event
+        event_date = key.split('-', 1)[1] # Extract date from the key like "6X-2023-08-15"
+        if event_date:
+            service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
+            service_event_ref.delete()
+            app.logger.info(f"Deleted service event for user {uid} on date {event_date} along with annotation.")
+
+        return jsonify({'status': 'success', 'message': 'Annotation deleted successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Delete annotation failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 # --- SIGNUP ---
 @app.route('/signup', methods=['POST'])
 def signup():

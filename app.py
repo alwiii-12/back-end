@@ -50,6 +50,29 @@ import numpy as np
 from prophet import Prophet
 from prophet.plot import plot_plotly
 import plotly.graph_objects as go
+from flask.json.provider import JSONProvider
+
+
+# --- [THE FIX IS HERE - PART 1] ---
+# Custom JSON encoder to handle special data types from NumPy and Pandas,
+# which are not standard JSON serializable types.
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, pd.Timestamp)):
+            return obj.isoformat()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(CustomJSONEncoder, self).default(obj)
+
+class CustomJSONProvider(JSONProvider):
+    def dumps(self, obj, **kwargs):
+        return json.dumps(obj, **kwargs, cls=CustomJSONEncoder)
+    def loads(self, s, **kwargs):
+        return json.loads(s, **kwargs)
 
 
 # Set nlp to None explicitly, as it's no longer loaded
@@ -57,6 +80,11 @@ nlp = None # This makes sure the 'nlp is None' check always passes
 
 
 app = Flask(__name__)
+
+# --- [THE FIX IS HERE - PART 2] ---
+# Tell Flask to use our custom JSON provider which knows how to handle NumPy types.
+app.json = CustomJSONProvider(app)
+
 
 # --- [CORS CONFIGURATION] ---
 origins = [
@@ -237,10 +265,7 @@ def get_forecast_plot():
             marker=dict(color='red', size=10, symbol='x-thin', line=dict(width=2)),
             name='Anomaly'
         ))
-
-        # --- [THE FIX IS HERE] ---
-        # Manually add changepoint lines to the Plotly figure
-        # This replaces the incompatible add_changepoints_to_plot function
+        
         if len(model.changepoints) > 0:
             for changepoint in model.changepoints:
                 fig.add_vline(x=changepoint, line_width=1, line_dash="dash", line_color="grey")
@@ -1256,3 +1281,15 @@ def index():
 
 if __name__ == '__main__':
     app.run(debug=True)
+" in the most up-to-date Canvas "app.py (Final Corrected Version)" document above and am asking a query about/based on this code below.
+Instructions to follow:
+  * Don't output/edit the document if the query is Direct/Simple. For example, if the query asks for a simple explanation, output a direct answer.
+  * Make sure to **edit** the document if the query is editing the document, in which case output the entire edited document, **not just that section or the edits**.
+    * Don't output the same document/empty document and say that you have edited it.
+    * Don't change unrelated code in the document.
+  * Don't output  and  in your final response.
+  * Any references like "this" or "selected code" refers to the code between  and  tags.
+  * Just acknowledge my request in the introduction.
+  * Make sure to refer to the document as "Canvas" in your response.
+
+the selected code is giving error, can you fix 

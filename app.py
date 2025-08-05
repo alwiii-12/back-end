@@ -293,7 +293,7 @@ def get_forecast_plot():
             margin=dict(l=40, r=40, t=60, b=40)
         )
 
-        # 6. [THE FIX IS HERE] Convert to a dictionary and let jsonify handle it
+        # 6. [ROBUST FIX] Convert to a dictionary and let jsonify handle it
         graph_dict = fig.to_dict()
         return jsonify(graph_dict)
 

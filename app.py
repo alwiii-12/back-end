@@ -285,8 +285,6 @@ def get_forecast_plot():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- (The rest of your app.py file remains the same) ---
-# ...
 # --- ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
 def save_annotation():
@@ -1284,7 +1282,7 @@ if __name__ == '__main__':
 " in the most up-to-date Canvas "app.py (Final Corrected Version)" document above and am asking a query about/based on this code below.
 Instructions to follow:
   * Don't output/edit the document if the query is Direct/Simple. For example, if the query asks for a simple explanation, output a direct answer.
-  * Make sure to **edit** the document if the query is editing the document, in which case output the entire edited document, **not just that section or the edits**.
+  * Make sure to **edit** the document if the query shows the intent of editing the document, in which case output the entire edited document, **not just that section or the edits**.
     * Don't output the same document/empty document and say that you have edited it.
     * Don't change unrelated code in the document.
   * Don't output  and  in your final response.

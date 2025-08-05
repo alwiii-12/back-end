@@ -48,7 +48,7 @@ import numpy as np
 
 # --- [NEW IMPORTS FOR PREDICTIVE PLOTTING] ---
 from prophet import Prophet
-from prophet.plot import plot_plotly, add_changepoints_to_plot
+from prophet.plot import plot_plotly
 import plotly.graph_objects as go
 
 
@@ -60,14 +60,14 @@ app = Flask(__name__)
 
 # --- [CORS CONFIGURATION] ---
 origins = [
-    "https://front-endnew.onrender.com"
+    "https://front-endnew.onrender.com",
+    "https://front-endview.onrender.com" # Added for flexibility
 ]
 CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
 
 # --- [EMAIL CONFIG] ---
-SENTRY_DSN = os.environ.get("SENTRY_DSN")
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
@@ -116,48 +116,31 @@ else:
 
 db = firestore.client()
 
-# --- [NEW HELPER FUNCTIONS FOR PREDICTIVE PLOTTING] ---
-# These functions are adapted from your predictive_service.py to be used by the new API endpoint.
-
+# --- [HELPER FUNCTIONS FOR PREDICTIVE PLOTTING] ---
 def fetch_service_events(hospital_id):
-    """
-    Fetches all marked service/calibration dates for a specific hospital.
-    This is used to inform the Prophet model of significant events.
-    """
     events = []
-    # Find the user UID associated with the hospital's centerId
     users_ref = db.collection('users').where('centerId', '==', hospital_id).limit(1).stream()
-    user_uid = None
-    for user in users_ref:
-        user_uid = user.id
-        break
+    user_uid = next((user.id for user in users_ref), None)
 
     if not user_uid:
         app.logger.warning(f"No user found for centerId: {hospital_id}, cannot fetch service events.")
         return None
 
     events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
-    for event in events_ref:
-        events.append(event.id) 
+    events = [event.id for event in events_ref]
     
     if not events:
         app.logger.info(f"No service/calibration events found for {hospital_id}.")
         return None
 
-    holidays_df = pd.DataFrame({
+    return pd.DataFrame({
         'holiday': 'service_day',
         'ds': pd.to_datetime(events),
         'lower_window': 0,
         'upper_window': 1,
     })
-    app.logger.info(f"Found {len(events)} service/calibration events for user {user_uid}.")
-    return holidays_df
 
 def fetch_all_historical_data(center_id, data_type, energy_type):
-    """
-    Fetches ALL historical data up to the current date for a given combination.
-    This data is used to train the Prophet model for the plot.
-    """
     app.logger.info(f"Fetching all historical data for plot: {center_id}, {data_type}, {energy_type}...")
     months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
     
@@ -173,72 +156,50 @@ def fetch_all_historical_data(center_id, data_type, energy_type):
                     for i, value in enumerate(row_data.get("values", [])):
                         day = i + 1
                         try:
-                            # Ensure value is not empty and day is valid for the month
-                            if value and day <= monthrange(year, mon)[1]:
+                            if value and str(value).strip() and day <= monthrange(year, mon)[1]:
                                 date = pd.to_datetime(f"{year}-{mon}-{day}")
                                 float_value = float(value)
                                 all_values.append({"ds": date, "y": float_value})
                         except (ValueError, TypeError):
-                            # Skip if value is not a valid number
                             continue
     
     if not all_values:
         return pd.DataFrame()
 
-    # Create DataFrame, sort by date, and remove duplicates keeping the last entry for a given day
-    df = pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
-    return df
+    return pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
 
 # --- APP CHECK VERIFICATION ---
 @app.before_request
 def verify_app_check_token():
+    if request.method == 'OPTIONS' or request.path == '/':
+        return None
     app_check_token = request.headers.get('X-Firebase-AppCheck')
-    if request.method == 'OPTIONS':
-        return None
-    if request.path == '/':
-        return None
     if not app_check_token:
         app.logger.warning("App Check token missing.")
         return jsonify({'error': 'Unauthorized: App Check token is missing'}), 401
     try:
         app_check.verify_token(app_check_token)
-        return None
-    except (ValueError, jwt.exceptions.DecodeError) as e:
-        app.logger.error(f"Invalid App Check token: {e}")
-        return jsonify({'error': f'Unauthorized: Invalid App Check token'}), 401
     except Exception as e:
-        app.logger.error(f"App Check verification failed with an unexpected error: {e}")
+        app.logger.error(f"App Check verification failed: {e}")
         return jsonify({'error': 'Unauthorized: App Check verification failed'}), 401
 
-# --- CONSTANTS ---
+# --- CONSTANTS & TOKENS ---
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
-DATA_TYPE_CONFIGS = {
-    "output": {"warning": 1.8, "tolerance": 2.0},
-    "flatness": {"warning": 0.9, "tolerance": 1.0},
-    "inline": {"warning": 0.9, "tolerance": 1.0},
-    "crossline": {"warning": 0.9, "tolerance": 1.0}
-}
 
-# --- VERIFY ADMIN TOKEN ---
 def verify_admin_token(id_token):
     try:
-        decoded_token = auth.verify_id_token(id_token)
-        uid = decoded_token['uid']
+        uid = auth.verify_id_token(id_token)['uid']
         user_doc = db.collection('users').document(uid).get()
-        if user_doc.exists and user_doc.to_dict().get('role') == 'Admin':
-            return True, uid
+        return user_doc.exists and user_doc.to_dict().get('role') == 'Admin', uid
     except Exception as e:
         app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-    return False, None
+        return False, None
 
-# --- [NEW] FORECAST PLOT ENDPOINT ---
+# --- [CORRECTED] FORECAST PLOT ENDPOINT ---
 @app.route('/api/v1/forecast-plot', methods=['GET'])
 def get_forecast_plot():
     try:
-        # 1. Get Parameters and Authenticate User
         id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token['uid']
@@ -246,7 +207,7 @@ def get_forecast_plot():
         data_type = request.args.get('dataType')
         energy = request.args.get('energy')
 
-        if not all([uid, data_type, energy]):
+        if not all([data_type, energy]):
             return jsonify({'error': 'Missing required parameters'}), 400
 
         user_doc = db.collection("users").document(uid).get()
@@ -254,46 +215,42 @@ def get_forecast_plot():
             return jsonify({'error': 'User not found'}), 404
         center_id = user_doc.to_dict().get("centerId")
 
-        # 2. Fetch Data and Train Model
         df = fetch_all_historical_data(center_id, data_type, energy)
         
         if df.empty or len(df) < 10:
             return jsonify({'error': 'Not enough historical data to generate a forecast plot.'}), 404
 
         holidays_df = fetch_service_events(center_id)
-
         model = Prophet(holidays=holidays_df)
         model.fit(df)
 
-        # 3. Create Forecast
         future = model.make_future_dataframe(periods=30)
         forecast = model.predict(future)
 
-        # 4. Generate the Plotly Figure
         fig = plot_plotly(model, forecast)
 
-        # 5. Customize the Plot
         results_df = pd.merge(forecast, df, on='ds', how='left')
         anomalies = results_df[(results_df['y'] > results_df['yhat_upper']) | (results_df['y'] < results_df['yhat_lower'])]
 
         fig.add_trace(go.Scatter(
-            x=anomalies['ds'], 
-            y=anomalies['y'], 
-            mode='markers',
+            x=anomalies['ds'], y=anomalies['y'], mode='markers',
             marker=dict(color='red', size=10, symbol='x-thin', line=dict(width=2)),
             name='Anomaly'
         ))
 
-        add_changepoints_to_plot(fig, model, forecast)
-
+        # --- [THE FIX IS HERE] ---
+        # Manually add changepoint lines to the Plotly figure
+        # This replaces the incompatible add_changepoints_to_plot function
+        if len(model.changepoints) > 0:
+            for changepoint in model.changepoints:
+                fig.add_vline(x=changepoint, line_width=1, line_dash="dash", line_color="grey")
+        
         fig.update_layout(
             title=f"Forecast for {energy} - {data_type.title()}",
-            xaxis_title="Date",
-            yaxis_title="Measured Value",
+            xaxis_title="Date", yaxis_title="Measured Value",
             margin=dict(l=40, r=40, t=60, b=40)
         )
 
-        # 6. [ROBUST FIX] Convert to a dictionary and let jsonify handle it
         graph_dict = fig.to_dict()
         return jsonify(graph_dict)
 
@@ -303,7 +260,8 @@ def get_forecast_plot():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-
+# --- (The rest of your app.py file remains the same) ---
+# ...
 # --- ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
 def save_annotation():
@@ -371,8 +329,6 @@ def delete_annotation():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-# --- (The rest of your app.py file remains the same) ---
-# ...
 # --- SIGNUP ---
 @app.route('/signup', methods=['POST'])
 def signup():

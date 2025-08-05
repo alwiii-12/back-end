@@ -239,7 +239,6 @@ def verify_admin_token(id_token):
 def get_forecast_plot():
     try:
         # 1. Get Parameters and Authenticate User
-        # Use Authorization header for UID to be more secure
         id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token['uid']
@@ -267,13 +266,13 @@ def get_forecast_plot():
         model.fit(df)
 
         # 3. Create Forecast
-        future = model.make_future_dataframe(periods=30) # Forecast 30 days into the future
+        future = model.make_future_dataframe(periods=30)
         forecast = model.predict(future)
 
         # 4. Generate the Plotly Figure
         fig = plot_plotly(model, forecast)
 
-        # 5. Customize the Plot: Add Anomalies and Changepoints
+        # 5. Customize the Plot
         results_df = pd.merge(forecast, df, on='ds', how='left')
         anomalies = results_df[(results_df['y'] > results_df['yhat_upper']) | (results_df['y'] < results_df['yhat_lower'])]
 
@@ -287,7 +286,6 @@ def get_forecast_plot():
 
         add_changepoints_to_plot(fig, model, forecast)
 
-        # Update layout for better appearance
         fig.update_layout(
             title=f"Forecast for {energy} - {data_type.title()}",
             xaxis_title="Date",
@@ -295,9 +293,9 @@ def get_forecast_plot():
             margin=dict(l=40, r=40, t=60, b=40)
         )
 
-        # 6. Convert to JSON and Return
-        graph_json = fig.to_json()
-        return jsonify(graph_json)
+        # 6. [THE FIX IS HERE] Convert to a dictionary and let jsonify handle it
+        graph_dict = fig.to_dict()
+        return jsonify(graph_dict)
 
     except Exception as e:
         app.logger.error(f"Forecast plot generation failed: {str(e)}", exc_info=True)
@@ -373,6 +371,8 @@ def delete_annotation():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+# --- (The rest of your app.py file remains the same) ---
+# ...
 # --- SIGNUP ---
 @app.route('/signup', methods=['POST'])
 def signup():

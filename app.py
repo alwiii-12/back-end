@@ -46,6 +46,11 @@ from io import BytesIO
 
 import numpy as np 
 
+# --- [NEW IMPORTS FOR PREDICTIVE PLOTTING] ---
+from prophet import Prophet
+from prophet.plot import plot_plotly, add_changepoints_to_plot
+import plotly.graph_objects as go
+
 
 # Set nlp to None explicitly, as it's no longer loaded
 nlp = None # This makes sure the 'nlp is None' check always passes
@@ -111,6 +116,79 @@ else:
 
 db = firestore.client()
 
+# --- [NEW HELPER FUNCTIONS FOR PREDICTIVE PLOTTING] ---
+# These functions are adapted from your predictive_service.py to be used by the new API endpoint.
+
+def fetch_service_events(hospital_id):
+    """
+    Fetches all marked service/calibration dates for a specific hospital.
+    This is used to inform the Prophet model of significant events.
+    """
+    events = []
+    # Find the user UID associated with the hospital's centerId
+    users_ref = db.collection('users').where('centerId', '==', hospital_id).limit(1).stream()
+    user_uid = None
+    for user in users_ref:
+        user_uid = user.id
+        break
+
+    if not user_uid:
+        app.logger.warning(f"No user found for centerId: {hospital_id}, cannot fetch service events.")
+        return None
+
+    events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
+    for event in events_ref:
+        events.append(event.id) 
+    
+    if not events:
+        app.logger.info(f"No service/calibration events found for {hospital_id}.")
+        return None
+
+    holidays_df = pd.DataFrame({
+        'holiday': 'service_day',
+        'ds': pd.to_datetime(events),
+        'lower_window': 0,
+        'upper_window': 1,
+    })
+    app.logger.info(f"Found {len(events)} service/calibration events for user {user_uid}.")
+    return holidays_df
+
+def fetch_all_historical_data(center_id, data_type, energy_type):
+    """
+    Fetches ALL historical data up to the current date for a given combination.
+    This data is used to train the Prophet model for the plot.
+    """
+    app.logger.info(f"Fetching all historical data for plot: {center_id}, {data_type}, {energy_type}...")
+    months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
+    
+    all_values = []
+    for month_doc in months_ref:
+        month_data = month_doc.to_dict()
+        field_name = f"data_{data_type}"
+        if field_name in month_data:
+            month_id_str = month_doc.id.replace("Month_", "")
+            year, mon = map(int, month_id_str.split("-"))
+            for row_data in month_data[field_name]:
+                if row_data.get("energy") == energy_type:
+                    for i, value in enumerate(row_data.get("values", [])):
+                        day = i + 1
+                        try:
+                            # Ensure value is not empty and day is valid for the month
+                            if value and day <= monthrange(year, mon)[1]:
+                                date = pd.to_datetime(f"{year}-{mon}-{day}")
+                                float_value = float(value)
+                                all_values.append({"ds": date, "y": float_value})
+                        except (ValueError, TypeError):
+                            # Skip if value is not a valid number
+                            continue
+    
+    if not all_values:
+        return pd.DataFrame()
+
+    # Create DataFrame, sort by date, and remove duplicates keeping the last entry for a given day
+    df = pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
+    return df
+
 # --- APP CHECK VERIFICATION ---
 @app.before_request
 def verify_app_check_token():
@@ -155,6 +233,78 @@ def verify_admin_token(id_token):
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
     return False, None
+
+# --- [NEW] FORECAST PLOT ENDPOINT ---
+@app.route('/api/v1/forecast-plot', methods=['GET'])
+def get_forecast_plot():
+    try:
+        # 1. Get Parameters and Authenticate User
+        # Use Authorization header for UID to be more secure
+        id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        decoded_token = auth.verify_id_token(id_token)
+        uid = decoded_token['uid']
+
+        data_type = request.args.get('dataType')
+        energy = request.args.get('energy')
+
+        if not all([uid, data_type, energy]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+
+        # 2. Fetch Data and Train Model
+        df = fetch_all_historical_data(center_id, data_type, energy)
+        
+        if df.empty or len(df) < 10:
+            return jsonify({'error': 'Not enough historical data to generate a forecast plot.'}), 404
+
+        holidays_df = fetch_service_events(center_id)
+
+        model = Prophet(holidays=holidays_df)
+        model.fit(df)
+
+        # 3. Create Forecast
+        future = model.make_future_dataframe(periods=30) # Forecast 30 days into the future
+        forecast = model.predict(future)
+
+        # 4. Generate the Plotly Figure
+        fig = plot_plotly(model, forecast)
+
+        # 5. Customize the Plot: Add Anomalies and Changepoints
+        results_df = pd.merge(forecast, df, on='ds', how='left')
+        anomalies = results_df[(results_df['y'] > results_df['yhat_upper']) | (results_df['y'] < results_df['yhat_lower'])]
+
+        fig.add_trace(go.Scatter(
+            x=anomalies['ds'], 
+            y=anomalies['y'], 
+            mode='markers',
+            marker=dict(color='red', size=10, symbol='x-thin', line=dict(width=2)),
+            name='Anomaly'
+        ))
+
+        add_changepoints_to_plot(fig, model, forecast)
+
+        # Update layout for better appearance
+        fig.update_layout(
+            title=f"Forecast for {energy} - {data_type.title()}",
+            xaxis_title="Date",
+            yaxis_title="Measured Value",
+            margin=dict(l=40, r=40, t=60, b=40)
+        )
+
+        # 6. Convert to JSON and Return
+        graph_json = fig.to_json()
+        return jsonify(graph_json)
+
+    except Exception as e:
+        app.logger.error(f"Forecast plot generation failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
 
 # --- ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
@@ -282,6 +432,7 @@ def login():
             'hospital': user_data.get("hospital", ""),
             'role': user_data.get("role", ""),
             'uid': uid,
+            'name': user_data.get("name", ""), # Return name on login
             'centerId': user_data.get("centerId", ""),
             'status': user_status
         }), 200
@@ -755,11 +906,19 @@ def dashboard_summary():
         # --- [NEW] Accept month parameter for historical queries ---
         month_param = request.args.get('month') # e.g., '2023-08'
         if month_param:
-            month_key = f"Month_{month_param}"
-            summary['display_month'] = datetime.strptime(month_param, '%Y-%m').strftime('%B %Y')
+            try:
+                # Validate month_param format
+                datetime.strptime(month_param, '%Y-%m')
+                month_key = f"Month_{month_param}"
+                summary['display_month'] = datetime.strptime(month_param, '%Y-%m').strftime('%B %Y')
+            except ValueError:
+                # Default to current month if format is invalid
+                month_key = datetime.now().strftime("Month_%Y-%m")
+                summary['display_month'] = "This Month"
         else:
             month_key = datetime.now().strftime("Month_%Y-%m")
             summary['display_month'] = "This Month"
+
 
         if role == 'Admin':
             # --- Admin Dashboard Logic ---

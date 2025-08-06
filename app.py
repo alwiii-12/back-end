@@ -411,7 +411,7 @@ def save_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- [NEW] EXPORT EXCEL ENDPOINT ---
+# --- [FIX #1] EXPORT EXCEL ENDPOINT ---
 @app.route('/export-excel', methods=['POST'])
 def export_excel():
     try:
@@ -740,6 +740,79 @@ def get_predictions():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
+# --- [FIX #2] ADMIN DASHBOARD SUMMARY ---
+def get_monthly_summary(center_id, month_key):
+    warnings = 0
+    oot = 0 # out-of-tolerance
+    
+    for data_type in DATA_TYPES:
+        config = DATA_TYPE_CONFIGS[data_type]
+        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_key}")
+        doc = doc_ref.get()
+        if doc.exists:
+            field_name = f"data_{data_type}"
+            if field_name in doc.to_dict():
+                for row_data in doc.to_dict().get(field_name, []):
+                    for value in row_data.get("values", []):
+                        try:
+                            num_value = float(value)
+                            if abs(num_value) > config['tolerance']:
+                                oot += 1
+                            elif abs(num_value) > config['warning']:
+                                warnings += 1
+                        except (ValueError, TypeError):
+                            continue
+    return warnings, oot
+
+@app.route('/dashboard-summary', methods=['GET'])
+def get_dashboard_summary():
+    # This is an admin-only endpoint, so we verify the token first
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    try:
+        month_key = request.args.get('month') # e.g., "2025-08"
+        if not month_key:
+            # Default to the current month if not specified in the request
+            month_key = datetime.now().strftime('%Y-%m')
+
+        hospitals_ref = db.collection('users').stream()
+        unique_hospitals = {user.to_dict().get('hospital') for user in hospitals_ref if user.to_dict().get('hospital')}
+
+        leaderboard = []
+        total_warnings = 0
+        total_oot = 0
+
+        for hospital in sorted(list(unique_hospitals)):
+            center_id = hospital # Assuming hospital name is used as the centerId
+            warnings, oot = get_monthly_summary(center_id, month_key)
+            total_warnings += warnings
+            total_oot += oot
+            leaderboard.append({"hospital": hospital, "warnings": warnings, "oot": oot})
+        
+        pending_users_query = db.collection("users").where('status', '==', "pending")
+        pending_users_count = len(list(pending_users_query.stream()))
+        
+        # Sort leaderboard by out-of-tolerance counts, then by warnings
+        leaderboard.sort(key=lambda x: (x['oot'], x['warnings']), reverse=True)
+
+        return jsonify({
+            "role": "Admin",
+            "pending_users_count": pending_users_count,
+            "total_warnings": total_warnings,
+            "total_oot": total_oot,
+            "leaderboard": leaderboard
+        }), 200
+
+    except Exception as e:
+        app.logger.error(f"Error getting dashboard summary: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
+
 # --- ADMIN ROUTES ---
 @app.route('/admin/pending-users', methods=['GET'])
 def get_pending_users():
@@ -933,7 +1006,7 @@ def get_hospital_data():
 
     try:
         hospital_id = request.args.get('hospitalId')
-        month_param = request.args.get('month')
+        month__param = request.args.get('month')
         if not hospital_id or not month_param:
             return jsonify({'error': 'Missing hospitalId or month parameter'}), 400
 

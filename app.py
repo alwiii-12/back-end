@@ -411,6 +411,70 @@ def save_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# --- [NEW] EXPORT EXCEL ENDPOINT ---
+@app.route('/export-excel', methods=['POST'])
+def export_excel():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get('uid')
+        month_param = content.get('month')
+        data_type = content.get('dataType')
+
+        if not all([uid, month_param, data_type]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        
+        center_id = user_doc.to_dict().get("centerId")
+        if not center_id:
+            return jsonify({'error': 'Missing centerId'}), 400
+
+        # Fetch data similar to the /data endpoint
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        col_headers = ['Energy'] + [str(i) for i in range(1, num_days + 1)]
+        
+        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
+        doc = doc_ref.get()
+        
+        firestore_field_name = f"data_{data_type}"
+        data_to_export = []
+        if doc.exists and firestore_field_name in doc.to_dict():
+            db_data = doc.to_dict()[firestore_field_name]
+            # Convert Firestore data to a list of lists for pandas
+            energy_map = {row.get("energy"): row.get("values", []) for row in db_data}
+            for energy_type in ENERGY_TYPES:
+                values = energy_map.get(energy_type, [])
+                full_row = (values + [""] * num_days)[:num_days]
+                data_to_export.append([energy_type] + full_row)
+        else:
+            # If no data, create an empty structure
+            data_to_export = [[e] + [""] * num_days for e in ENERGY_TYPES]
+
+        # Create a pandas DataFrame
+        df = pd.DataFrame(data_to_export, columns=col_headers)
+        
+        # Create an in-memory Excel file
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name=f'{data_type.capitalize()} QA Data')
+        output.seek(0)
+        
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'LINAC_QA_{data_type.upper()}_{month_param}.xlsx'
+        )
+
+    except Exception as e:
+        app.logger.error(f"Excel export failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
 
 # --- LOAD DATA ---
 @app.route('/data', methods=['GET'])

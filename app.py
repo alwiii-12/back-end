@@ -46,34 +46,6 @@ from io import BytesIO
 
 import numpy as np 
 
-# --- [NEW IMPORTS FOR PREDICTIVE PLOTTING] ---
-from prophet import Prophet
-from prophet.plot import plot_plotly
-import plotly.graph_objects as go
-from flask.json.provider import JSONProvider
-
-
-# --- [THE FIX IS HERE - PART 1] ---
-# Custom JSON encoder to handle special data types from NumPy and Pandas,
-# which are not standard JSON serializable types.
-class CustomJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, (datetime, pd.Timestamp)):
-            return obj.isoformat()
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(CustomJSONEncoder, self).default(obj)
-
-class CustomJSONProvider(JSONProvider):
-    def dumps(self, obj, **kwargs):
-        return json.dumps(obj, **kwargs, cls=CustomJSONEncoder)
-    def loads(self, s, **kwargs):
-        return json.loads(s, **kwargs)
-
 
 # Set nlp to None explicitly, as it's no longer loaded
 nlp = None # This makes sure the 'nlp is None' check always passes
@@ -81,15 +53,9 @@ nlp = None # This makes sure the 'nlp is None' check always passes
 
 app = Flask(__name__)
 
-# --- [THE FIX IS HERE - PART 2] ---
-# Tell Flask to use our custom JSON provider which knows how to handle NumPy types.
-app.json = CustomJSONProvider(app)
-
-
 # --- [CORS CONFIGURATION] ---
 origins = [
-    "https://front-endnew.onrender.com",
-    "https://front-endview.onrender.com" # Added for flexibility
+    "https://front-endnew.onrender.com"
 ]
 CORS(app, resources={r"/*": {"origins": origins}})
 
@@ -144,148 +110,52 @@ else:
 
 db = firestore.client()
 
-# --- [HELPER FUNCTIONS FOR PREDICTIVE PLOTTING] ---
-def fetch_service_events(hospital_id):
-    events = []
-    users_ref = db.collection('users').where('centerId', '==', hospital_id).limit(1).stream()
-    user_uid = next((user.id for user in users_ref), None)
-
-    if not user_uid:
-        app.logger.warning(f"No user found for centerId: {hospital_id}, cannot fetch service events.")
-        return None
-
-    events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
-    events = [event.id for event in events_ref]
-    
-    if not events:
-        app.logger.info(f"No service/calibration events found for {hospital_id}.")
-        return None
-
-    return pd.DataFrame({
-        'holiday': 'service_day',
-        'ds': pd.to_datetime(events),
-        'lower_window': 0,
-        'upper_window': 1,
-    })
-
-def fetch_all_historical_data(center_id, data_type, energy_type):
-    app.logger.info(f"Fetching all historical data for plot: {center_id}, {data_type}, {energy_type}...")
-    months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
-    
-    all_values = []
-    for month_doc in months_ref:
-        month_data = month_doc.to_dict()
-        field_name = f"data_{data_type}"
-        if field_name in month_data:
-            month_id_str = month_doc.id.replace("Month_", "")
-            year, mon = map(int, month_id_str.split("-"))
-            for row_data in month_data[field_name]:
-                if row_data.get("energy") == energy_type:
-                    for i, value in enumerate(row_data.get("values", [])):
-                        day = i + 1
-                        try:
-                            if value and str(value).strip() and day <= monthrange(year, mon)[1]:
-                                date = pd.to_datetime(f"{year}-{mon}-{day}")
-                                float_value = float(value)
-                                all_values.append({"ds": date, "y": float_value})
-                        except (ValueError, TypeError):
-                            continue
-    
-    if not all_values:
-        return pd.DataFrame()
-
-    return pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
-
 # --- APP CHECK VERIFICATION ---
 @app.before_request
 def verify_app_check_token():
-    if request.method == 'OPTIONS' or request.path == '/':
-        return None
     app_check_token = request.headers.get('X-Firebase-AppCheck')
+    if request.method == 'OPTIONS':
+        return None
+    if request.path == '/':
+        return None
     if not app_check_token:
         app.logger.warning("App Check token missing.")
         return jsonify({'error': 'Unauthorized: App Check token is missing'}), 401
     try:
         app_check.verify_token(app_check_token)
+        return None
+    except (ValueError, jwt.exceptions.DecodeError) as e:
+        app.logger.error(f"Invalid App Check token: {e}")
+        return jsonify({'error': f'Unauthorized: Invalid App Check token'}), 401
     except Exception as e:
-        app.logger.error(f"App Check verification failed: {e}")
+        app.logger.error(f"App Check verification failed with an unexpected error: {e}")
         return jsonify({'error': 'Unauthorized: App Check verification failed'}), 401
 
-# --- CONSTANTS & TOKENS ---
+# --- CONSTANTS ---
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
+DATA_TYPE_CONFIGS = {
+    "output": {"warning": 1.8, "tolerance": 2.0},
+    "flatness": {"warning": 0.9, "tolerance": 1.0},
+    "inline": {"warning": 0.9, "tolerance": 1.0},
+    "crossline": {"warning": 0.9, "tolerance": 1.0}
+}
 
+# --- VERIFY ADMIN TOKEN ---
 def verify_admin_token(id_token):
     try:
-        uid = auth.verify_id_token(id_token)['uid']
-        user_doc = db.collection('users').document(uid).get()
-        return user_doc.exists and user_doc.to_dict().get('role') == 'Admin', uid
-    except Exception as e:
-        app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
-        return False, None
-
-# --- [CORRECTED] FORECAST PLOT ENDPOINT ---
-@app.route('/api/v1/forecast-plot', methods=['GET'])
-def get_forecast_plot():
-    try:
-        id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token['uid']
-
-        data_type = request.args.get('dataType')
-        energy = request.args.get('energy')
-
-        if not all([data_type, energy]):
-            return jsonify({'error': 'Missing required parameters'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-
-        df = fetch_all_historical_data(center_id, data_type, energy)
-        
-        if df.empty or len(df) < 10:
-            return jsonify({'error': 'Not enough historical data to generate a forecast plot.'}), 404
-
-        holidays_df = fetch_service_events(center_id)
-        model = Prophet(holidays=holidays_df)
-        model.fit(df)
-
-        future = model.make_future_dataframe(periods=30)
-        forecast = model.predict(future)
-
-        fig = plot_plotly(model, forecast)
-
-        results_df = pd.merge(forecast, df, on='ds', how='left')
-        anomalies = results_df[(results_df['y'] > results_df['yhat_upper']) | (results_df['y'] < results_df['yhat_lower'])]
-
-        fig.add_trace(go.Scatter(
-            x=anomalies['ds'], y=anomalies['y'], mode='markers',
-            marker=dict(color='red', size=10, symbol='x-thin', line=dict(width=2)),
-            name='Anomaly'
-        ))
-        
-        if len(model.changepoints) > 0:
-            for changepoint in model.changepoints:
-                fig.add_vline(x=changepoint, line_width=1, line_dash="dash", line_color="grey")
-        
-        fig.update_layout(
-            title=f"Forecast for {energy} - {data_type.title()}",
-            xaxis_title="Date", yaxis_title="Measured Value",
-            margin=dict(l=40, r=40, t=60, b=40)
-        )
-
-        graph_dict = fig.to_dict()
-        return jsonify(graph_dict)
-
+        user_doc = db.collection('users').document(uid).get()
+        if user_doc.exists and user_doc.to_dict().get('role') == 'Admin':
+            return True, uid
     except Exception as e:
-        app.logger.error(f"Forecast plot generation failed: {str(e)}", exc_info=True)
+        app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-        return jsonify({'error': str(e)}), 500
+    return False, None
 
-# --- ANNOTATION ENDPOINTS ---
+# --- [NEW] ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
 def save_annotation():
     try:
@@ -298,15 +168,18 @@ def save_annotation():
         if not all([uid, month, key, data]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
+        # Save the regular annotation text
         annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
         annotation_ref.set(data)
 
+        # [NEW] Handle the service event logic
         is_service_event = data.get('isServiceEvent', False)
         event_date = data.get('eventDate')
         
         if event_date:
             service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
             if is_service_event:
+                # If checkbox is checked, save the event
                 service_event_ref.set({
                     'description': data.get('text', 'Service/Calibration'),
                     'energy': data.get('energy'),
@@ -314,6 +187,7 @@ def save_annotation():
                 })
                 app.logger.info(f"Service event marked for user {uid} on date {event_date}")
             else:
+                # If checkbox is unchecked, delete any existing event for that date
                 service_event_ref.delete()
                 app.logger.info(f"Service event unmarked for user {uid} on date {event_date}")
 
@@ -335,10 +209,12 @@ def delete_annotation():
         if not all([uid, month, key]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
         
+        # Delete the regular annotation
         annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
         annotation_ref.delete()
 
-        event_date = key.split('-', 1)[1]
+        # [NEW] Also delete any associated service event
+        event_date = key.split('-', 1)[1] # Extract date from the key like "6X-2023-08-15"
         if event_date:
             service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
             service_event_ref.delete()
@@ -411,7 +287,6 @@ def login():
             'hospital': user_data.get("hospital", ""),
             'role': user_data.get("role", ""),
             'uid': uid,
-            'name': user_data.get("name", ""), # Return name on login
             'centerId': user_data.get("centerId", ""),
             'status': user_status
         }), 200
@@ -580,71 +455,6 @@ def get_data():
         return jsonify({'data': table}), 200
     except Exception as e:
         app.logger.error(f"Get data failed for {data_type}: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'error': str(e)}), 500
-
-
-# --- [NEW] EXPORT TO EXCEL ENDPOINT ---
-@app.route('/export-excel', methods=['POST'])
-def export_excel():
-    try:
-        content = request.get_json(force=True)
-        month_param = content.get("month")
-        uid = content.get("uid")
-        data_type = content.get("dataType")
-
-        if not all([month_param, uid, data_type]):
-            return jsonify({'error': 'Missing required fields'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-
-        year, mon = map(int, month_param.split("-"))
-        _, num_days = monthrange(year, mon)
-        
-        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
-        doc = doc_ref.get()
-
-        if not doc.exists:
-            return jsonify({'error': 'No data found for the selected month'}), 404
-
-        firestore_field_name = f"data_{data_type}"
-        doc_data = doc.to_dict().get(firestore_field_name, [])
-        
-        if not doc_data:
-            return jsonify({'error': f'No data of type {data_type} found for the selected month'}), 404
-
-        # Convert to a format suitable for pandas DataFrame
-        data_for_df = {}
-        for row in doc_data:
-            energy = row.get("energy")
-            values = row.get("values", [])
-            data_for_df[energy] = pd.Series(values)
-
-        df = pd.DataFrame(data_for_df).T # Transpose to have energies as rows
-        
-        # Set column headers to be days of the month
-        df.columns = [f"Day {i+1}" for i in range(num_days)]
-        df.index.name = "Energy"
-
-        # Create an in-memory Excel file
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name=f'{data_type.title()} Data')
-        output.seek(0)
-        
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f'LINAC_QA_{data_type.upper()}_{month_param}.xlsx'
-        )
-
-    except Exception as e:
-        app.logger.error(f"Export to Excel failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
@@ -862,128 +672,6 @@ def get_predictions():
             
     except Exception as e:
         app.logger.error(f"Get predictions failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'error': str(e)}), 500
-
-# --- [UPDATED] DASHBOARD SUMMARY ENDPOINT ---
-@app.route('/dashboard-summary', methods=['GET'])
-def dashboard_summary():
-    try:
-        id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-        decoded_token = auth.verify_id_token(id_token)
-        uid = decoded_token['uid']
-        user_doc = db.collection('users').document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 403
-        
-        user_data = user_doc.to_dict()
-        role = user_data.get('role')
-        
-        summary = {}
-
-        # --- [NEW] Accept month parameter for historical queries ---
-        month_param = request.args.get('month') # e.g., '2023-08'
-        if month_param:
-            try:
-                # Validate month_param format
-                datetime.strptime(month_param, '%Y-%m')
-                month_key = f"Month_{month_param}"
-                summary['display_month'] = datetime.strptime(month_param, '%Y-%m').strftime('%B %Y')
-            except ValueError:
-                # Default to current month if format is invalid
-                month_key = datetime.now().strftime("Month_%Y-%m")
-                summary['display_month'] = "This Month"
-        else:
-            month_key = datetime.now().strftime("Month_%Y-%m")
-            summary['display_month'] = "This Month"
-
-
-        if role == 'Admin':
-            # --- Admin Dashboard Logic ---
-            pending_users_snap = db.collection('users').where('status', '==', 'pending').stream()
-            summary['pending_users_count'] = len(list(pending_users_snap))
-            
-            hospitals_snap = db.collection('users').stream()
-            hospital_ids = sorted(list(set(u.to_dict().get('hospital') for u in hospitals_snap if u.to_dict().get('hospital'))))
-            
-            leaderboard = []
-            total_warnings = 0
-            total_oot = 0
-
-            for hospital_id in hospital_ids:
-                hospital_warnings = 0
-                hospital_oot = 0
-                months_coll = db.collection('linac_data').document(hospital_id).collection('months')
-                month_doc = months_coll.document(month_key).get()
-                if month_doc.exists:
-                    month_data = month_doc.to_dict()
-                    for data_type, config in DATA_TYPE_CONFIGS.items():
-                        field_name = f"data_{data_type}"
-                        if field_name in month_data:
-                            for row in month_data[field_name]:
-                                for val_str in row.get('values', []):
-                                    try:
-                                        val = float(val_str)
-                                        if abs(val) > config['tolerance']:
-                                            hospital_oot += 1
-                                        elif abs(val) > config['warning']:
-                                            hospital_warnings += 1
-                                    except (ValueError, TypeError):
-                                        continue
-                leaderboard.append({'hospital': hospital_id, 'warnings': hospital_warnings, 'oot': hospital_oot})
-                total_warnings += hospital_warnings
-                total_oot += hospital_oot
-
-            summary['leaderboard'] = sorted(leaderboard, key=lambda x: x['oot'], reverse=True)
-            summary['total_warnings'] = total_warnings
-            summary['total_oot'] = total_oot
-            summary['role'] = 'Admin'
-
-        else:
-            # --- Regular User Dashboard Logic ---
-            center_id = user_data.get('centerId')
-            summary['role'] = user_data.get('role', 'User')
-            summary['hospital'] = center_id
-            
-            user_warnings = 0
-            user_oot = 0
-            machines_needing_attention = []
-
-            month_doc = db.collection('linac_data').document(center_id).collection('months').document(month_key).get()
-            if month_doc.exists:
-                month_data = month_doc.to_dict()
-                for data_type, config in DATA_TYPE_CONFIGS.items():
-                    field_name = f"data_{data_type}"
-                    if field_name in month_data:
-                        for row in month_data[field_name]:
-                            energy = row.get('energy')
-                            values = [float(v) for v in row.get('values', []) if v]
-                            
-                            for val in values:
-                                if abs(val) > config['tolerance']:
-                                    user_oot += 1
-                                    attention_msg = f"{energy} {data_type.title()}: Had an out-of-tolerance reading this month."
-                                    if attention_msg not in machines_needing_attention:
-                                        machines_needing_attention.append(attention_msg)
-                                elif abs(val) > config['warning']:
-                                    user_warnings += 1
-            
-            summary['warnings'] = user_warnings
-            summary['oot'] = user_oot
-            summary['machines_needing_attention'] = machines_needing_attention
-            
-            service_events_snap = db.collection('service_events').document(uid).collection('events').order_by(firestore.Query.DESCENDING).limit(1).stream()
-            last_service_date = "Never"
-            for event in service_events_snap:
-                last_service_date = event.id
-            summary['last_service_date'] = last_service_date
-
-
-        return jsonify(summary), 200
-
-    except Exception as e:
-        app.logger.error(f"Dashboard summary failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500

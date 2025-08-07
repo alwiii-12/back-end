@@ -174,9 +174,10 @@ if __name__ == '__main__':
                     # [REFACTORED] Group the single large forecast into monthly chunks
                     # and save each chunk to a separate document in Firestore.
                     
-                    # We only want to see the predicted values, not the historical fit
                     last_historical_date = all_data_df['ds'].max()
-                    future_predictions = full_forecast[full_forecast['ds'] > last_historical_date]
+                    
+                    # [THE FIX] Use >= to include predictions for the current month
+                    future_predictions = full_forecast[full_forecast['ds'] >= last_historical_date]
                     
                     # Group predictions by month
                     future_predictions['month_key'] = future_predictions['ds'].dt.strftime('%Y-%m')

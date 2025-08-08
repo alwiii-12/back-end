@@ -26,6 +26,22 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
+# --- [NEW] FUNCTION TO DELETE OLD PREDICTIONS ---
+def delete_old_predictions(center_id):
+    """
+    Deletes all existing prediction documents for a given hospital to prevent stale data.
+    """
+    print(f"Deleting old predictions for {center_id}...")
+    predictions_ref = db.collection("linac_predictions").where("centerId", "==", center_id)
+    old_predictions = predictions_ref.stream()
+    
+    deleted_count = 0
+    for doc in old_predictions:
+        doc.reference.delete()
+        deleted_count += 1
+    
+    print(f"Deleted {deleted_count} old prediction document(s).")
+
 # --- FUNCTION TO FETCH SERVICE EVENTS (Unchanged) ---
 def fetch_service_events(center_id):
     """
@@ -92,11 +108,8 @@ def fetch_all_historical_data(center_id, data_type, energy_type):
     df = pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
     return df
 
-# --- [REFACTORED] MODEL TRAINING & PREDICTION ---
+# --- MODEL TRAINING & PREDICTION (Unchanged) ---
 def train_and_predict(full_df, service_events_df):
-    """
-    [REFACTORED] Trains one model on ALL data and generates a forecast for the next 12 months.
-    """
     if full_df.empty or len(full_df) < 10:
         print(f"Not enough data to train. Found {len(full_df)} records. Skipping.")
         return None
@@ -106,7 +119,6 @@ def train_and_predict(full_df, service_events_df):
     model = Prophet(holidays=service_events_df)
     model.fit(full_df)
     
-    # Create a future dataframe to predict for the next 365 days
     future = model.make_future_dataframe(periods=365)
 
     print("Generating 365-day forecast...")
@@ -116,11 +128,7 @@ def train_and_predict(full_df, service_events_df):
 
 # --- SAVE PREDICTION TO FIRESTORE (Unchanged) ---
 def save_monthly_prediction(center_id, data_type, energy_type, month_key, forecast_chunk):
-    """
-    Saves a month-specific forecast to Firestore.
-    """
     forecast_data = []
-    # Use the provided forecast_chunk instead of the full forecast
     for _, row in forecast_chunk.iterrows():
         forecast_data.append({
             "date": row['ds'].strftime('%Y-%m-%d'),
@@ -142,7 +150,7 @@ def save_monthly_prediction(center_id, data_type, energy_type, month_key, foreca
     })
     print(f"Successfully saved forecast for {month_key} to Firestore.")
 
-# --- [REFACTORED] MAIN EXECUTION BLOCK ---
+# --- MAIN EXECUTION BLOCK (Updated) ---
 if __name__ == '__main__':
     HOSPITAL_IDS_TO_PROCESS = [
         "aoi_gurugram", "medanta_gurugram", "fortis_delhi", "apollo_chennai", "max_delhi"
@@ -154,45 +162,32 @@ if __name__ == '__main__':
     ]
 
     for hospital_id in HOSPITAL_IDS_TO_PROCESS:
+        # --- [NEW] Call the cleanup function before processing each hospital ---
+        delete_old_predictions(hospital_id)
+        
         service_events = fetch_service_events(hospital_id)
 
         for data_type in DATA_TYPES_TO_PROCESS:
             for energy in ENERGY_TYPES_TO_PROCESS:
                 print(f"\n--- Processing: {hospital_id} / {data_type} / {energy} ---")
                 
-                # Fetch all historical data ONCE
                 all_data_df = fetch_all_historical_data(hospital_id, data_type, energy)
                 
                 if all_data_df.empty:
                     print("No data found, skipping.")
                     continue
 
-                # [REFACTORED] Train model ONCE
                 full_forecast = train_and_predict(all_data_df, service_events)
 
                 if full_forecast is not None:
-                    # [REFACTORED] Group the single large forecast into monthly chunks
-                    # and save each chunk to a separate document in Firestore.
-                    
                     last_historical_date = all_data_df['ds'].max()
-                    
-                    # [THE FIX] Use >= to include predictions for the current month
                     future_predictions = full_forecast[full_forecast['ds'] >= last_historical_date]
-                    
-                    # Group predictions by month
                     future_predictions['month_key'] = future_predictions['ds'].dt.strftime('%Y-%m')
-                    
-                    # Get all unique months that have predictions
                     months_to_save = future_predictions['month_key'].unique()
 
                     for month in months_to_save:
-                        # Get the slice of the forecast for this specific month
                         monthly_forecast_chunk = future_predictions[future_predictions['month_key'] == month]
-                        
-                        # We only need a 7-day forecast for the frontend display
-                        # We will save the first 7 days of prediction for each month
                         final_chunk_to_save = monthly_forecast_chunk.head(7)
-
                         save_monthly_prediction(hospital_id, data_type, energy, month, final_chunk_to_save)
     
     print("\n\n--- All forecasts processed. Batch complete. ---")

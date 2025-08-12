@@ -40,9 +40,11 @@ import firebase_admin
 from firebase_admin import credentials, firestore, auth, app_check
 import jwt
 
-# New imports for Excel export
+# New imports for Excel export and historical forecast
 import pandas as pd
 from io import BytesIO
+from prophet import Prophet
+
 
 import numpy as np 
 
@@ -740,6 +742,95 @@ def get_predictions():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
+# --- NEW ENDPOINT FOR ON-DEMAND HISTORICAL FORECASTS ---
+@app.route('/historical-forecast', methods=['POST'])
+def get_historical_forecast():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get('uid')
+        month_param = content.get('month') # e.g., "2025-06"
+        data_type = content.get('dataType')
+        energy = content.get('energy')
+
+        if not all([uid, month_param, data_type, energy]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+
+        # --- 1. Fetch all historical data UP TO the requested month ---
+        months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
+        all_values = []
+        end_date_for_training = pd.to_datetime(month_param) + pd.offsets.MonthEnd(0)
+
+        for month_doc in months_ref:
+            month_id_str = month_doc.id.replace("Month_", "")
+            if pd.to_datetime(month_id_str) > end_date_for_training:
+                continue # Skip months after the one we are forecasting from
+
+            month_data = month_doc.to_dict()
+            field_name = f"data_{data_type}"
+            if field_name in month_data:
+                year, mon = map(int, month_id_str.split("-"))
+                for row_data in month_data[field_name]:
+                    if row_data.get("energy") == energy:
+                        for i, value in enumerate(row_data.get("values", [])):
+                            day = i + 1
+                            try:
+                                if value and day <= monthrange(year, mon)[1]:
+                                    date = pd.to_datetime(f"{year}-{mon}-{day}")
+                                    float_value = float(value)
+                                    all_values.append({"ds": date, "y": float_value})
+                            except (ValueError, TypeError):
+                                continue
+        
+        df_for_training = pd.DataFrame(all_values)
+        if len(df_for_training) < 10:
+            return jsonify({'error': 'Not enough historical data to generate a forecast.'}), 404
+
+        # --- 2. Train a temporary model and create a 7-day forecast ---
+        model = Prophet()
+        model.fit(df_for_training)
+        future = model.make_future_dataframe(periods=7)
+        forecast_df = model.predict(future)
+        
+        # Filter to only the 7 days AFTER the last known data point
+        last_known_date = df_for_training['ds'].max()
+        final_forecast = forecast_df[forecast_df['ds'] > last_known_date]
+
+        # --- 3. Fetch the ACTUAL data for the forecast period for comparison ---
+        forecast_start_date = final_forecast['ds'].min()
+        forecast_end_date = final_forecast['ds'].max()
+        next_month_key = forecast_start_date.strftime('%Y-%m')
+
+        actuals = []
+        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{next_month_key}").get()
+        if doc_ref.exists:
+            field_name = f"data_{data_type}"
+            data = doc_ref.to_dict().get(field_name, [])
+            energy_row = next((item for item in data if item["energy"] == energy), None)
+            if energy_row:
+                for i, value in enumerate(energy_row.get("values", [])):
+                    day = i + 1
+                    current_date = pd.to_datetime(f"{next_month_key}-{day}")
+                    if forecast_start_date <= current_date <= forecast_end_date:
+                        try:
+                            actuals.append(float(value))
+                        except (ValueError, TypeError):
+                            actuals.append(None)
+        
+        # --- 4. Send both forecast and actuals back to the frontend ---
+        return jsonify({
+            'forecast': final_forecast[['ds', 'yhat']].to_dict('records'),
+            'actuals': actuals
+        }), 200
+
+    except Exception as e:
+        app.logger.error(f"Historical forecast failed: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 # --- [FIX #2] ADMIN DASHBOARD SUMMARY ---
 def get_monthly_summary(center_id, month_key):
     warnings = 0
@@ -1006,7 +1097,7 @@ def get_hospital_data():
 
     try:
         hospital_id = request.args.get('hospitalId')
-        month__param = request.args.get('month')
+        month_param = request.args.get('month')
         if not hospital_id or not month_param:
             return jsonify({'error': 'Missing hospitalId or month parameter'}), 400
 

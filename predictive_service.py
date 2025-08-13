@@ -187,7 +187,8 @@ if __name__ == '__main__':
 
                     for month in months_to_save:
                         monthly_forecast_chunk = future_predictions[future_predictions['month_key'] == month]
-                        final_chunk_to_save = monthly_forecast_chunk.head(7)
+                        # --- [THE CHANGE IS HERE] ---
+                        final_chunk_to_save = monthly_forecast_chunk.head(30)
                         save_monthly_prediction(hospital_id, data_type, energy, month, final_chunk_to_save)
     
     print("\n\n--- All forecasts processed. Batch complete. ---")

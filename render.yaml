@@ -4,7 +4,7 @@ services:
     name: backend-results # Use your actual backend service name
     env: python
     buildCommand: "./post_deploy.sh"
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    startCommand: "gunicorn --workers 3 --timeout 120 --log-level debug app:app --bind 0.0.0.0:$PORT"
     envVars:
       # IMPORTANT: Make sure your FIREBASE_CREDENTIALS and other secrets
       # are set in the Render dashboard for this service.

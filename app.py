@@ -764,8 +764,6 @@ def get_historical_forecast():
         months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
         all_values = []
         
-        # --- [THE FIX IS HERE] ---
-        # This now correctly sets the training data cutoff to the last day of the PREVIOUS month.
         end_date_for_training = pd.to_datetime(month_param) - pd.Timedelta(days=1)
 
         for month_doc in months_ref:
@@ -793,13 +791,14 @@ def get_historical_forecast():
         if len(df_for_training) < 10:
             return jsonify({'error': 'Not enough historical data to generate a forecast.'}), 404
 
-        # --- 2. Train a temporary model and create a 7-day forecast ---
+        # --- 2. Train a temporary model and create a forecast ---
         model = Prophet()
         model.fit(df_for_training)
-        future = model.make_future_dataframe(periods=7)
+        # --- [THE CHANGE IS HERE] ---
+        future = model.make_future_dataframe(periods=30)
         forecast_df = model.predict(future)
         
-        # Filter to only the 7 days AFTER the last known data point
+        # Filter to only the 30 days AFTER the last known data point
         last_known_date = df_for_training['ds'].max()
         final_forecast = forecast_df[forecast_df['ds'] > last_known_date]
 

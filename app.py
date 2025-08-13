@@ -413,7 +413,7 @@ def save_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- [FIX #1] EXPORT EXCEL ENDPOINT ---
+# --- EXPORT EXCEL ENDPOINT ---
 @app.route('/export-excel', methods=['POST'])
 def export_excel():
     try:
@@ -763,7 +763,10 @@ def get_historical_forecast():
         # --- 1. Fetch all historical data UP TO the requested month ---
         months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
         all_values = []
-        end_date_for_training = pd.to_datetime(month_param) + pd.offsets.MonthEnd(0)
+        
+        # --- [THE FIX IS HERE] ---
+        # This now correctly sets the training data cutoff to the last day of the PREVIOUS month.
+        end_date_for_training = pd.to_datetime(month_param) - pd.Timedelta(days=1)
 
         for month_doc in months_ref:
             month_id_str = month_doc.id.replace("Month_", "")
@@ -831,7 +834,7 @@ def get_historical_forecast():
         app.logger.error(f"Historical forecast failed: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-# --- [FIX #2] ADMIN DASHBOARD SUMMARY ---
+# --- ADMIN DASHBOARD SUMMARY ---
 def get_monthly_summary(center_id, month_key):
     warnings = 0
     oot = 0 # out-of-tolerance

@@ -55,9 +55,11 @@ nlp = None # This makes sure the 'nlp is None' check always passes
 
 app = Flask(__name__)
 
-# --- [CORS CONFIGURATION] ---
+# --- [CORS CONFIGURATION - THE FIX IS HERE] ---
 origins = [
-    "https://front-endnew.onrender.com"
+    "https://front-endnew.onrender.com",
+    "http://127.0.0.1:5500", # For local testing
+    "http://localhost:5500"  # For local testing
 ]
 CORS(app, resources={r"/*": {"origins": origins}})
 

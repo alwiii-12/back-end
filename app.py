@@ -1190,6 +1190,95 @@ def get_audit_logs():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
+# --- [NEW] REAL-TIME RE-FORECAST ENDPOINT ---
+@app.route('/re-forecast', methods=['POST'])
+def re_forecast():
+    try:
+        # 1. Get the necessary data from the frontend request
+        content = request.get_json(force=True)
+        uid = content.get('uid')
+        month_param = content.get('month') # e.g., "2025-08"
+        data_type = content.get('dataType')
+        energy = content.get('energy')
+
+        if not all([uid, month_param, data_type, energy]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+
+        # 2. Fetch all historical data UP TO the current date
+        months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
+        all_values = []
+        
+        for month_doc in months_ref:
+            month_id_str = month_doc.id.replace("Month_", "")
+            month_data = month_doc.to_dict()
+            field_name = f"data_{data_type}"
+            if field_name in month_data:
+                year, mon = map(int, month_id_str.split("-"))
+                for row_data in month_data[field_name]:
+                    if row_data.get("energy") == energy:
+                        for i, value in enumerate(row_data.get("values", [])):
+                            day = i + 1
+                            try:
+                                if value and day <= monthrange(year, mon)[1]:
+                                    date = pd.to_datetime(f"{year}-{mon}-{day}")
+                                    # Only include data up to today
+                                    if date <= pd.Timestamp.now():
+                                        all_values.append({"ds": date, "y": float(value)})
+                            except (ValueError, TypeError):
+                                continue
+        
+        df_for_training = pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
+        
+        if len(df_for_training) < 5: # Need at least a few points to train
+            return jsonify({'error': 'Not enough historical data to generate a forecast.'}), 404
+
+        # 3. Fetch service events to teach the model about calibrations
+        service_events_df = None
+        events = []
+        events_ref = db.collection('service_events').document(uid).collection('events').stream()
+        for event in events_ref:
+            events.append(event.id)
+        if events:
+            service_events_df = pd.DataFrame({
+                'holiday': 'service_day',
+                'ds': pd.to_datetime(events),
+                'lower_window': 0,
+                'upper_window': 1,
+            })
+
+        # 4. Train a temporary Prophet model and create a forecast for the rest of the month
+        model = Prophet(holidays=service_events_df)
+        model.fit(df_for_training)
+        
+        last_known_date = df_for_training['ds'].max()
+        days_in_month = monthrange(last_known_date.year, last_known_date.month)[1]
+        periods_to_forecast = days_in_month - last_known_date.day
+
+        if periods_to_forecast <= 0:
+            return jsonify({'forecast': []}), 200 # Month is already over
+
+        future = model.make_future_dataframe(periods=periods_to_forecast)
+        forecast_df = model.predict(future)
+        
+        # Filter to only the future predictions within the current month
+        final_forecast = forecast_df[forecast_df['ds'] > last_known_date]
+
+        # 5. Send the new forecast back to the frontend
+        return jsonify({
+            'forecast': final_forecast[['ds', 'yhat']].to_dict('records')
+        }), 200
+
+    except Exception as e:
+        app.logger.error(f"On-demand re-forecast failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
 # --- INDEX AND RUN ---
 @app.route('/')
 def index():

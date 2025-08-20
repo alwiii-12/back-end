@@ -55,7 +55,7 @@ nlp = None # This makes sure the 'nlp is None' check always passes
 
 app = Flask(__name__)
 
-# --- [CORS CONFIGURATION - THE FIX IS HERE] ---
+# --- [CORS CONFIGURATION] ---
 origins = [
     "https://front-endnew.onrender.com",
     "http://127.0.0.1:5500", # For local testing
@@ -617,7 +617,7 @@ def update_live_forecast():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- ADMIN ENDPOINTS & OTHER ROUTES (Restored) ---
+# --- ADMIN ENDPOINTS & OTHER ROUTES ---
 @app.route('/export-excel', methods=['POST'])
 def export_excel():
     try:
@@ -881,11 +881,37 @@ def get_historical_forecast():
         app.logger.error(f"Historical forecast failed: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+# --- [MODIFIED] DASHBOARD SUMMARY ENDPOINT ---
+def get_monthly_summary(center_id, month_key):
+    warnings = 0
+    oot = 0
+    
+    for data_type in DATA_TYPES:
+        config = DATA_TYPE_CONFIGS[data_type]
+        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_key}")
+        doc = doc_ref.get()
+        if doc.exists:
+            field_name = f"data_{data_type}"
+            if field_name in doc.to_dict():
+                for row_data in doc.to_dict().get(field_name, []):
+                    for value in row_data.get("values", []):
+                        try:
+                            num_value = float(value)
+                            if abs(num_value) > config['tolerance']:
+                                oot += 1
+                            elif abs(num_value) > config['warning']:
+                                warnings += 1
+                        except (ValueError, TypeError):
+                            continue
+    return warnings, oot
+
 @app.route('/dashboard-summary', methods=['GET'])
 def get_dashboard_summary():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
+    is_admin, admin_uid = verify_admin_token(token)
     if not is_admin:
+        # If not an admin, we can't perform the leaderboard summary.
+        # This endpoint is now admin-only.
         return jsonify({'message': 'Unauthorized'}), 403
     
     try:

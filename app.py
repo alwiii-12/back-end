@@ -617,7 +617,7 @@ def update_live_forecast():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- [RESTORED] ADMIN ENDPOINTS & OTHER ROUTES ---
+# --- ADMIN ENDPOINTS & OTHER ROUTES (Restored) ---
 @app.route('/export-excel', methods=['POST'])
 def export_excel():
     try:
@@ -925,6 +925,144 @@ def get_dashboard_summary():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
+
+@app.route('/admin/users', methods=['GET'])
+def get_all_users():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+    try:
+        users = db.collection("users").stream()
+        return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
+    except Exception as e:
+        app.logger.error(f"Get all users failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
+@app.route('/admin/update-user-status', methods=['POST'])
+def update_user_status():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, admin_uid_from_token = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid")
+        
+        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token) 
+
+        new_status = content.get("status")
+        new_role = content.get("role")
+        new_hospital = content.get("hospital")
+
+        if not uid:
+            return jsonify({'message': 'UID is required'}), 400
+        
+        updates = {}
+        if new_status is not None and new_status in ["active", "pending", "rejected"]:
+            updates["status"] = new_status
+        if new_role is not None and new_role in ["Medical physicist", "RSO", "Admin"]:
+            updates["role"] = new_role
+        if new_hospital is not None and new_hospital.strip() != "":
+            updates["hospital"] = new_hospital
+            updates["centerId"] = new_hospital
+
+        if not updates:
+            return jsonify({'message': 'No valid fields provided for update'}), 400
+
+        ref = db.collection("users").document(uid)
+        
+        old_user_doc = ref.get()
+        old_user_data = old_user_doc.to_dict() if old_user_doc.exists else {}
+
+        ref.update(updates)
+
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "adminUid": requesting_admin_uid,
+            "action": "user_update",
+            "targetUserUid": uid,
+            "changes": {},
+            "oldData": {},
+            "newData": {},
+            "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")
+        }
+
+        if "status" in updates:
+            audit_entry["changes"]["status"] = {"old": old_user_data.get("status"), "new": updates["status"]}
+        if "role" in updates:
+            audit_entry["changes"]["role"] = {"old": old_user_data.get("role"), "new": updates["role"]}
+        if "hospital" in updates:
+            audit_entry["changes"]["hospital"] = {"old": old_user_data.get("hospital"), "new": updates["hospital"]}
+        
+        db.collection("audit_logs").add(audit_entry)
+        app.logger.info(f"Audit: User {uid} updated by {requesting_admin_uid}")
+
+        updated_user_data = ref.get().to_dict()
+        if updated_user_data.get("email"):
+            subject = "LINAC QA Account Update"
+            body = "Your LINAC QA account details have been updated."
+            if "status" in updates:
+                body += f"\nYour account status is now: {updates['status'].upper()}."
+            if "role" in updates:
+                 body += f"\nYour role has been updated to: {updates['role']}."
+            if "hospital" in updates:
+                 body += f"\nYour hospital has been updated to: {updates['hospital']}."
+            send_notification_email(updated_user_data["email"], subject, body)
+
+        return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Error updating user: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
+@app.route('/admin/delete-user', methods=['DELETE'])
+def delete_user():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, admin_uid_from_token = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        content = request.get_json(force=True)
+        uid_to_delete = content.get("uid")
+        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token)
+
+        if not uid_to_delete:
+            return jsonify({'message': 'Missing UID for deletion'}), 400
+
+        user_doc_ref = db.collection("users").document(uid_to_delete)
+        user_data_to_log = user_doc_ref.get().to_dict() or {}
+
+        try:
+            auth.delete_user(uid_to_delete)
+        except Exception as e:
+            if "User record not found" not in str(e):
+                app.logger.error(f"Error deleting Firebase Auth user {uid_to_delete}: {str(e)}", exc_info=True)
+                return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
+
+        user_doc_ref.delete()
+        
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "adminUid": requesting_admin_uid,
+            "action": "user_deletion",
+            "targetUserUid": uid_to_delete,
+            "deletedUserData": user_data_to_log
+        }
+        db.collection("audit_logs").add(audit_entry)
+        app.logger.info(f"Audit: User {uid_to_delete} deleted by {requesting_admin_uid}")
+
+        return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 @app.route('/admin/hospital-data', methods=['GET'])
 def get_hospital_data():

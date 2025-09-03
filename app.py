@@ -673,6 +673,10 @@ def get_historical_forecast():
         
         forecast_df = model.predict(future)
         
+        # --- [THIS IS THE FIX from our conversation] ---
+        # Convert the 'ds' column to the 'YYYY-MM-DD' string format
+        forecast_df['ds'] = forecast_df['ds'].dt.strftime('%Y-%m-%d')
+        
         actuals = []
         doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}").get()
         if doc_ref.exists:

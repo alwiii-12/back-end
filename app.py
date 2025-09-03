@@ -285,6 +285,7 @@ def login():
             "targetUserUid": uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
+                "user_email": user_data.get("email", "N/A"), # Added the email
                 "ip_address": request.remote_addr,
                 "user_agent": request.headers.get('User-Agent')
             }
@@ -897,6 +898,7 @@ def log_event():
             "targetUserUid": user_uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
+                "user_email": user_data.get("email", "N/A"), # Added the email
                 "ip_address": request.remote_addr,
                 "user_agent": request.headers.get('User-Agent')
             }

@@ -1133,9 +1133,15 @@ def get_audit_logs():
                 else:
                     user_doc = db.collection('users').document(user_uid).get()
                     if user_doc.exists:
-                        user_name = user_doc.to_dict().get('name', user_uid)
-                        log_data['user_display'] = user_name
-                        user_cache[user_uid] = user_name
+                        # --- [THIS IS THE FIX] ---
+                        # Get both name and email for a more informative display
+                        user_data = user_doc.to_dict()
+                        user_name = user_data.get('name', user_uid)
+                        user_email = user_data.get('email', '')
+                        display_string = f"{user_name} ({user_email})" if user_email else user_name
+                        log_data['user_display'] = display_string
+                        user_cache[user_uid] = display_string
+                        # --- [END OF FIX] ---
                     else:
                         log_data['user_display'] = user_uid
                         user_cache[user_uid] = user_uid

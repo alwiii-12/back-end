@@ -278,6 +278,20 @@ def login():
         if user_status != "active":
             return jsonify({'status': 'error', 'message': 'This account is not active.'}), 403
 
+        # --- [START OF FIX] Add this block to create the audit log ---
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "action": "user_login",
+            "targetUserUid": uid,
+            "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
+            "details": {
+                "ip_address": request.remote_addr,
+                "user_agent": request.headers.get('User-Agent')
+            }
+        }
+        db.collection("audit_logs").add(audit_entry)
+        # --- [END OF FIX] ---
+
         return jsonify({
             'status': 'success',
             'hospital': user_data.get("hospital", ""),
@@ -862,6 +876,40 @@ def diagnose_step():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 # --- [END] Re-added missing functions ---
+
+# --- [START OF FIX] New endpoint for logging frontend events like logout ---
+@app.route('/log_event', methods=['POST'])
+def log_event():
+    try:
+        content = request.get_json(force=True)
+        action = content.get("action")
+        user_uid = content.get("userUid")
+
+        if not action or not user_uid:
+            return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
+
+        user_doc = db.collection('users').document(user_uid).get()
+        user_data = user_doc.to_dict() if user_doc.exists else {}
+        
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "action": action, # e.g., 'user_logout'
+            "targetUserUid": user_uid,
+            "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
+            "details": {
+                "ip_address": request.remote_addr,
+                "user_agent": request.headers.get('User-Agent')
+            }
+        }
+        db.collection("audit_logs").add(audit_entry)
+        
+        return jsonify({'status': 'success', 'message': 'Event logged'}), 200
+    except Exception as e:
+        app.logger.error(f"Error logging event: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+# --- [END OF FIX] ---
 
 @app.route('/admin/users', methods=['GET'])
 def get_all_users():

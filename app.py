@@ -49,8 +49,6 @@ from prophet import Prophet
 import numpy as np 
 
 # NOTE: ProxyFix is no longer needed with the new direct header inspection method.
-# from werkzeug.middleware.proxy_fix import ProxyFix
-
 
 # Set nlp to None explicitly, as it's no longer loaded
 nlp = None # This makes sure the 'nlp is None' check always passes
@@ -59,7 +57,6 @@ nlp = None # This makes sure the 'nlp is None' check always passes
 app = Flask(__name__)
 
 # NOTE: The ProxyFix middleware has been removed.
-# app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 
 # --- [CORS CONFIGURATION] ---
@@ -294,7 +291,7 @@ def login():
         if user_status != "active":
             return jsonify({'status': 'error', 'message': 'This account is not active.'}), 403
 
-        # --- [START OF FIX] Add this block to create the audit log ---
+        # --- AUDIT LOGGING ---
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
             "action": "user_login",
@@ -302,12 +299,11 @@ def login():
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
                 "user_email": user_data.get("email", "N/A"),
-                "ip_address": get_real_ip(), # Using the helper function
+                "ip_address": get_real_ip(),
                 "user_agent": request.headers.get('User-Agent')
             }
         }
         db.collection("audit_logs").add(audit_entry)
-        # --- [END OF FIX] ---
 
         return jsonify({
             'status': 'success',
@@ -704,8 +700,6 @@ def get_historical_forecast():
         
         forecast_df = model.predict(future)
         
-        # --- [THIS IS THE FIX from our conversation] ---
-        # Convert the 'ds' column to the 'YYYY-MM-DD' string format
         forecast_df['ds'] = forecast_df['ds'].dt.strftime('%Y-%m-%d')
         
         actuals = []
@@ -728,7 +722,6 @@ def get_historical_forecast():
         app.logger.error(f"Historical forecast failed: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-# --- [START] Re-added missing functions ---
 def get_monthly_summary(center_id, month_key):
     warnings = 0
     oot = 0
@@ -892,9 +885,7 @@ def diagnose_step():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
-# --- [END] Re-added missing functions ---
 
-# --- [START OF FIX] New endpoint for logging frontend events like logout ---
 @app.route('/log_event', methods=['POST'])
 def log_event():
     try:
@@ -914,8 +905,8 @@ def log_event():
             "targetUserUid": user_uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
-                "user_email": user_data.get("email", "N/A"), # Added the email
-                "ip_address": get_real_ip(), # Using the helper function
+                "user_email": user_data.get("email", "N/A"),
+                "ip_address": get_real_ip(),
                 "user_agent": request.headers.get('User-Agent')
             }
         }
@@ -927,14 +918,9 @@ def log_event():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
-# --- [END OF FIX] ---
 
 # --- BENCHMARKING ENDPOINT ---
 def calculate_hospital_metrics(center_id, period_days=90):
-    """
-    Helper function to calculate performance metrics for a single hospital
-    over a given period.
-    """
     all_numeric_values = {dtype: [] for dtype in DATA_TYPES}
     warnings = 0
     oots = 0
@@ -947,7 +933,6 @@ def calculate_hospital_metrics(center_id, period_days=90):
         month_id_str = month_doc.id.replace("Month_", "")
         month_dt = datetime.strptime(month_id_str, '%Y-%m')
 
-        # Simple check to see if the month is within our calculation period
         if month_dt.year < start_date.year or (month_dt.year == start_date.year and month_dt.month < start_date.month):
             continue
 
@@ -966,14 +951,10 @@ def calculate_hospital_metrics(center_id, period_days=90):
                             elif abs_val > config["warning"]:
                                 warnings += 1
                         except (ValueError, TypeError):
-                            continue # Ignore non-numeric or empty values
+                            continue
     
-    # Calculate metrics using numpy for efficiency and accuracy
     results = {
-        "hospital": center_id,
-        "warnings": warnings,
-        "oots": oots,
-        "metrics": {}
+        "hospital": center_id, "warnings": warnings, "oots": oots, "metrics": {}
     }
     for data_type, values in all_numeric_values.items():
         if values:
@@ -982,7 +963,7 @@ def calculate_hospital_metrics(center_id, period_days=90):
                 "std_deviation": np.nanstd(values),
                 "data_points": len(values)
             }
-        else: # Handle cases with no data
+        else:
             results["metrics"][data_type] = { "mean_deviation": 0, "std_deviation": 0, "data_points": 0 }
             
     return results
@@ -996,18 +977,13 @@ def get_benchmark_metrics():
         return jsonify({'message': 'Unauthorized'}), 403
 
     try:
-        period = int(request.args.get('period', 90)) # Default to 90 days
+        period = int(request.args.get('period', 90))
         
-        # Get all unique hospital IDs from the users collection
         users_ref = db.collection('users').stream()
         unique_hospitals = sorted(list({user.to_dict().get('hospital') for user in users_ref if user.to_dict().get('hospital')}))
 
-        benchmark_data = []
-        for hospital in unique_hospitals:
-            metrics = calculate_hospital_metrics(hospital, period_days=period)
-            benchmark_data.append(metrics)
+        benchmark_data = [calculate_hospital_metrics(hospital, period_days=period) for hospital in unique_hospitals]
         
-        # Sort by out-of-tolerance and then warnings
         benchmark_data.sort(key=lambda x: (x['oots'], x['warnings']), reverse=True)
 
         return jsonify(benchmark_data), 200
@@ -1017,6 +993,95 @@ def get_benchmark_metrics():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
+
+# --- SERVICE EFFICACY ENDPOINT ---
+def get_data_in_date_range(center_id, start_date, end_date):
+    all_values = {dtype: [] for dtype in DATA_TYPES}
+    
+    months_to_check = set([(d.year, d.month) for d in pd.date_range(start_date, end_date)])
+    
+    for year, month in months_to_check:
+        month_key = f"{year}-{str(month).zfill(2)}"
+        month_doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_key}")
+        month_doc = month_doc_ref.get()
+
+        if not month_doc.exists: continue
+
+        month_data = month_doc.to_dict()
+        for data_type in DATA_TYPES:
+            field_name = f"data_{data_type}"
+            if field_name in month_data:
+                for row_data in month_data[field_name]:
+                    for i, value in enumerate(row_data.get("values", [])):
+                        day = i + 1
+                        try:
+                            current_date = datetime(year, month, day)
+                            if start_date <= current_date <= end_date:
+                                all_values[data_type].append(float(value))
+                        except (ValueError, TypeError):
+                            continue
+    return all_values
+
+
+@app.route('/admin/service-impact-analysis', methods=['GET'])
+def get_service_impact_analysis():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        users_ref = db.collection('users').stream()
+        all_users = {user.id: user.to_dict() for user in users_ref}
+        
+        all_service_events = []
+        for uid, user_data in all_users.items():
+            hospital = user_data.get("hospital")
+            if not hospital: continue
+            
+            events_ref = db.collection('service_events').document(uid).collection('events').stream()
+            for event in events_ref:
+                all_service_events.append({"hospital": hospital, "date": event.id})
+
+        analysis_results = []
+        processed_events = set()
+
+        for event in sorted(all_service_events, key=lambda x: x['date'], reverse=True):
+            event_key = (event['hospital'], event['date'])
+            if event_key in processed_events: continue
+            processed_events.add(event_key)
+
+            service_date = datetime.strptime(event['date'], '%Y-%m-%d')
+            
+            before_start, before_end = service_date - timedelta(days=15), service_date - timedelta(days=1)
+            after_start, after_end = service_date + timedelta(days=1), service_date + timedelta(days=15)
+            
+            before_data = get_data_in_date_range(event['hospital'], before_start, before_end)
+            after_data = get_data_in_date_range(event['hospital'], after_start, after_end)
+            
+            event_result = {"hospital": event['hospital'], "service_date": event['date'], "analysis": {}}
+            
+            for data_type in DATA_TYPES:
+                before_values, after_values = before_data.get(data_type, []), after_data.get(data_type, [])
+
+                if not before_values or not after_values: continue
+
+                before_std, after_std = np.nanstd(before_values), np.nanstd(after_values)
+                
+                improvement = ((before_std - after_std) / before_std) * 100 if before_std > 0 else 0
+
+                event_result["analysis"][data_type] = {
+                    "before_std": before_std, "after_std": after_std, "stability_improvement_percent": improvement
+                }
+            
+            if event_result["analysis"]: analysis_results.append(event_result)
+
+        return jsonify(analysis_results), 200
+
+    except Exception as e:
+        app.logger.error(f"Error in service impact analysis: {str(e)}", exc_info=True)
+        return jsonify({'message': str(e)}), 500
+
 
 @app.route('/admin/users', methods=['GET'])
 def get_all_users():
@@ -1238,15 +1303,12 @@ def get_audit_logs():
                 else:
                     user_doc = db.collection('users').document(user_uid).get()
                     if user_doc.exists:
-                        # --- [THIS IS THE FIX] ---
-                        # Get both name and email for a more informative display
                         user_data = user_doc.to_dict()
                         user_name = user_data.get('name', user_uid)
                         user_email = user_data.get('email', '')
                         display_string = f"{user_name} ({user_email})" if user_email else user_name
                         log_data['user_display'] = display_string
                         user_cache[user_uid] = display_string
-                        # --- [END OF FIX] ---
                     else:
                         log_data['user_display'] = user_uid
                         user_cache[user_uid] = user_uid

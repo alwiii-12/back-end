@@ -913,6 +913,95 @@ def log_event():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 # --- [END OF FIX] ---
 
+# --- BENCHMARKING ENDPOINT ---
+def calculate_hospital_metrics(center_id, period_days=90):
+    """
+    Helper function to calculate performance metrics for a single hospital
+    over a given period.
+    """
+    all_numeric_values = {dtype: [] for dtype in DATA_TYPES}
+    warnings = 0
+    oots = 0
+    
+    start_date = datetime.now() - timedelta(days=period_days)
+    
+    months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
+
+    for month_doc in months_ref:
+        month_id_str = month_doc.id.replace("Month_", "")
+        month_dt = datetime.strptime(month_id_str, '%Y-%m')
+
+        # Simple check to see if the month is within our calculation period
+        if month_dt.year < start_date.year or (month_dt.year == start_date.year and month_dt.month < start_date.month):
+            continue
+
+        month_data = month_doc.to_dict()
+        for data_type, config in DATA_TYPE_CONFIGS.items():
+            field_name = f"data_{data_type}"
+            if field_name in month_data:
+                for row in month_data[field_name]:
+                    for value in row.get("values", []):
+                        try:
+                            val = float(value)
+                            all_numeric_values[data_type].append(val)
+                            abs_val = abs(val)
+                            if abs_val > config["tolerance"]:
+                                oots += 1
+                            elif abs_val > config["warning"]:
+                                warnings += 1
+                        except (ValueError, TypeError):
+                            continue # Ignore non-numeric or empty values
+    
+    # Calculate metrics using numpy for efficiency and accuracy
+    results = {
+        "hospital": center_id,
+        "warnings": warnings,
+        "oots": oots,
+        "metrics": {}
+    }
+    for data_type, values in all_numeric_values.items():
+        if values:
+            results["metrics"][data_type] = {
+                "mean_deviation": np.nanmean(values),
+                "std_deviation": np.nanstd(values),
+                "data_points": len(values)
+            }
+        else: # Handle cases with no data
+            results["metrics"][data_type] = { "mean_deviation": 0, "std_deviation": 0, "data_points": 0 }
+            
+    return results
+
+
+@app.route('/admin/benchmark-metrics', methods=['GET'])
+def get_benchmark_metrics():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        period = int(request.args.get('period', 90)) # Default to 90 days
+        
+        # Get all unique hospital IDs from the users collection
+        users_ref = db.collection('users').stream()
+        unique_hospitals = sorted(list({user.to_dict().get('hospital') for user in users_ref if user.to_dict().get('hospital')}))
+
+        benchmark_data = []
+        for hospital in unique_hospitals:
+            metrics = calculate_hospital_metrics(hospital, period_days=period)
+            benchmark_data.append(metrics)
+        
+        # Sort by out-of-tolerance and then warnings
+        benchmark_data.sort(key=lambda x: (x['oots'], x['warnings']), reverse=True)
+
+        return jsonify(benchmark_data), 200
+
+    except Exception as e:
+        app.logger.error(f"Error getting benchmark metrics: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
 @app.route('/admin/users', methods=['GET'])
 def get_all_users():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1163,3 +1252,4 @@ def index():
 
 if __name__ == '__main__':
     app.run(debug=True)
+

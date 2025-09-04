@@ -48,8 +48,8 @@ from prophet import Prophet
 
 import numpy as np 
 
-# --- [NEW IMPORT FOR IP ADDRESS FIX] ---
-from werkzeug.middleware.proxy_fix import ProxyFix
+# NOTE: ProxyFix is no longer needed with the new direct header inspection method.
+# from werkzeug.middleware.proxy_fix import ProxyFix
 
 
 # Set nlp to None explicitly, as it's no longer loaded
@@ -58,9 +58,8 @@ nlp = None # This makes sure the 'nlp is None' check always passes
 
 app = Flask(__name__)
 
-# --- [IP ADDRESS FIX] ---
-# Tell Flask to trust the X-Forwarded-For header from the Render proxy
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+# NOTE: The ProxyFix middleware has been removed.
+# app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 
 # --- [CORS CONFIGURATION] ---
@@ -77,6 +76,15 @@ app.logger.setLevel(logging.DEBUG)
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
+
+# --- [HELPER FUNCTION FOR REAL IP] ---
+def get_real_ip():
+    """Gets the real IP address from the request headers."""
+    if 'X-Forwarded-For' in request.headers:
+        # The X-Forwarded-For header can contain a comma-separated list of IPs.
+        # The client's IP is typically the first one.
+        return request.headers['X-Forwarded-For'].split(',')[0].strip()
+    return request.remote_addr
 
 # --- [EMAIL SENDER FUNCTION] ---
 def send_notification_email(recipient_email, subject, body):
@@ -293,8 +301,8 @@ def login():
             "targetUserUid": uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
-                "user_email": user_data.get("email", "N/A"), # Added the email
-                "ip_address": request.remote_addr,
+                "user_email": user_data.get("email", "N/A"),
+                "ip_address": get_real_ip(), # Using the helper function
                 "user_agent": request.headers.get('User-Agent')
             }
         }
@@ -907,7 +915,7 @@ def log_event():
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
                 "user_email": user_data.get("email", "N/A"), # Added the email
-                "ip_address": request.remote_addr,
+                "ip_address": get_real_ip(), # Using the helper function
                 "user_agent": request.headers.get('User-Agent')
             }
         }

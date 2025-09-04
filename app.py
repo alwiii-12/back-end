@@ -48,6 +48,9 @@ from prophet import Prophet
 
 import numpy as np 
 
+# --- [NEW IMPORT FOR IP ADDRESS FIX] ---
+from werkzeug.middleware.proxy_fix import ProxyFix
+
 
 # Set nlp to None explicitly, as it's no longer loaded
 nlp = None # This makes sure the 'nlp is None' check always passes
@@ -55,7 +58,12 @@ nlp = None # This makes sure the 'nlp is None' check always passes
 
 app = Flask(__name__)
 
-# --- [CORS CONFIGURATION - THE FIX IS HERE] ---
+# --- [IP ADDRESS FIX] ---
+# Tell Flask to trust the X-Forwarded-For header from the Render proxy
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+
+# --- [CORS CONFIGURATION] ---
 origins = [
     "https://front-endnew.onrender.com",
     "http://127.0.0.1:5500", # For local testing
@@ -652,7 +660,7 @@ def get_historical_forecast():
         months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
         all_values = []
         
-        end_date_for_training = pd.to_datetime(month_param) - pd.Timedelta(days=1)
+        end_date_for_training = pd.to_datetime(month_param) - timedelta(days=1)
 
         for month_doc in months_ref:
             month_id_str = month_doc.id.replace("Month_", "")

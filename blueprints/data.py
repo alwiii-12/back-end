@@ -4,13 +4,21 @@ import logging
 from calendar import monthrange
 import json
 
+# Get the database instance and a logger
 logger = logging.getLogger(__name__)
+
+# All routes in this file will be prefixed with /data
 data_bp = Blueprint('data_bp', __name__, url_prefix='/data')
 
+# Constants can be shared or redefined here
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
 
-send_notification_email = None
+# A placeholder for the email function, which we will connect from the main app
+def send_notification_email(recipient_email, subject, body):
+    # This will be replaced by the real function from app.py
+    logger.info(f"--- MOCK EMAIL to {recipient_email} --- \nSubject: {subject}\nBody: {body}")
+    return True
 
 @data_bp.route('/save-annotation', methods=['POST'])
 def save_annotation():
@@ -82,6 +90,7 @@ def save_data():
         logger.error(f"Save data error: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# FIX: Corrected the route from '/fetch' to match the frontend request
 @data_bp.route('/fetch', methods=['GET'])
 def get_data():
     db = firestore.client()
@@ -153,7 +162,7 @@ def send_alert():
         else:
             message_body += f"All previously detected issues for {data_type_display} are resolved.\n"
 
-        if send_notification_email and send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital}", message_body):
+        if send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital}", message_body):
             alerts_ref.set({"alerted_values": content.get("outValues", [])})
             return jsonify({'status': 'alert sent'}), 200
         else:

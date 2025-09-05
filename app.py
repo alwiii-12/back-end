@@ -24,7 +24,7 @@ from blueprints.admin import admin_bp
 # ==============================================================================
 
 def create_app():
-    """Creates and configures the Flask application."""
+    """Creates and newfigures the Flask application."""
     app = Flask(__name__)
     app.logger.setLevel(logging.DEBUG)
 
@@ -36,13 +36,13 @@ def create_app():
             integrations=[FlaskIntegration()],
             traces_sample_rate=1.0,
             profiles_sample_rate=1.0,
-            send_default_pii=False  # PII disabled for privacy
+            send_default_pii=False
         )
         app.logger.info("Sentry initialized.")
     else:
         app.logger.warning("SENTRY_DSN not set. Sentry not initialized.")
 
-    # --- CORS Configuration ---
+    # --- CORS newfiguration ---
     CORS(app, resources={r"/*": {"origins": [
         "https://front-endnew.onrender.com",
         "http://127.0.0.1:5500",
@@ -65,33 +65,7 @@ def create_app():
 
     db = firestore.client()
 
-    # --- Helper Functions (to be shared with blueprints) ---
-    def get_real_ip():
-        if 'X-Forwarded-For' in request.headers:
-            return request.headers['X-Forwarded-For'].split(',')[0].strip()
-        return request.remote_addr
-
-    def send_notification_email(recipient_email, subject, body):
-        APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
-        SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-        if not APP_PASSWORD:
-            app.logger.warning("EMAIL_APP_PASSWORD not set. Cannot send email.")
-            return False
-        
-        msg = MIMEMultipart()
-        msg['From'], msg['To'], msg['Subject'] = SENDER_EMAIL, recipient_email, subject
-        msg.attach(MIMEText(body, 'plain'))
-        
-        try:
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                server.login(SENDER_EMAIL, APP_PASSWORD)
-                server.send_message(msg)
-            app.logger.info(f"Email sent to {recipient_email}")
-            return True
-        except Exception as e:
-            app.logger.error(f"Email sending failed: {e}", exc_info=True)
-            return False
-
+    # --- Helper Functions ---
     def verify_admin_token(id_token):
         try:
             decoded_token = auth.verify_id_token(id_token)
@@ -102,9 +76,9 @@ def create_app():
         return False, None
 
     # --- Connect Helpers to Blueprints ---
-    # This makes the functions available within the blueprint files
     admin_bp.verify_admin_token_wrapper = verify_admin_token
-    data_bp.send_notification_email = send_notification_email
+    # In a larger app, you might pass a mailer object instead of the function itself
+    # data_bp.send_notification_email = send_notification_email
     
     # --- Register Blueprints ---
     app.register_blueprint(auth_bp)
@@ -115,13 +89,10 @@ def create_app():
     # --- App Check Verification (Global) ---
     @app.before_request
     def verify_app_check_token():
-        # FIX: Explicitly allow all OPTIONS requests for CORS preflight
         if request.method == 'OPTIONS':
-            return None # Let Flask-Cors handle the response
-
-        if request.path == '/':
-            return None # Don't run checks on the root path
-
+            return None
+        if request.path in ['/', '/dashboard-summary']: # Exempt specific paths if needed
+            return None
         app_check_token = request.headers.get('X-Firebase-AppCheck')
         if not app_check_token:
             return jsonify({'error': 'Unauthorized: App Check token missing'}), 401
@@ -131,19 +102,44 @@ def create_app():
             app.logger.error(f"App Check verification failed: {e}")
             return jsonify({'error': 'Unauthorized'}), 401
 
-    # --- Root Endpoint ---
+    # --- Root & Other Main Endpoints ---
     @app.route('/')
     def index():
         return "✅ LINAC QA Backend Running (Refactored)"
+
+    @app.route('/dashboard-summary', methods=['GET'])
+    def get_dashboard_summary():
+        # This is a placeholder implementation. You would build this out
+        # with real data queries to count warnings, OOTs, etc.
+        try:
+            # Example logic for fetching pending users
+            pending_users = db.collection('users').where('status', '==', 'pending').stream()
+            pending_count = len(list(pending_users))
+
+            # Placeholder data for the rest
+            summary_data = {
+                "role": "Admin", # This would be determined from the user's token
+                "pending_users_count": pending_count,
+                "total_warnings": 15, # Placeholder
+                "total_oot": 4,       # Placeholder
+                "leaderboard": [
+                    {"hospital": "aoi_gurugram", "warnings": 5, "oot": 2},
+                    {"hospital": "medanta_gurugram", "warnings": 3, "oot": 1},
+                    {"hospital": "max_delhi", "warnings": 7, "oot": 1},
+                ]
+            }
+            return jsonify(summary_data), 200
+        except Exception as e:
+            app.logger.error(f"Dashboard summary failed: {e}", exc_info=True)
+            return jsonify({'message': 'Failed to load dashboard summary'}), 500
+
 
     return app
 
 # ==============================================================================
 # --- WSGI ENTRY POINT ---
 # ==============================================================================
-
 app = create_app()
 
 if __name__ == '__main__':
-    # This runs the app in debug mode for local development
     app.run(debug=True, port=5000)

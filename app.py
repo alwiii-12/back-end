@@ -52,6 +52,8 @@ def create_app():
     # --- Firebase Initialization ---
     try:
         firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+        if not firebase_json:
+            raise ValueError("FIREBASE_CREDENTIALS environment variable not set.")
         firebase_dict = json.loads(firebase_json)
         if not firebase_admin._apps:
             cred = credentials.Certificate(firebase_dict)
@@ -113,8 +115,13 @@ def create_app():
     # --- App Check Verification (Global) ---
     @app.before_request
     def verify_app_check_token():
-        if request.method == 'OPTIONS' or request.path == '/':
-            return None
+        # FIX: Explicitly allow all OPTIONS requests for CORS preflight
+        if request.method == 'OPTIONS':
+            return None # Let Flask-Cors handle the response
+
+        if request.path == '/':
+            return None # Don't run checks on the root path
+
         app_check_token = request.headers.get('X-Firebase-AppCheck')
         if not app_check_token:
             return jsonify({'error': 'Unauthorized: App Check token missing'}), 401

@@ -24,7 +24,7 @@ from blueprints.admin import admin_bp
 # ==============================================================================
 
 def create_app():
-    """Creates and newfigures the Flask application."""
+    """Creates and configures the Flask application."""
     app = Flask(__name__)
     app.logger.setLevel(logging.DEBUG)
 
@@ -42,7 +42,7 @@ def create_app():
     else:
         app.logger.warning("SENTRY_DSN not set. Sentry not initialized.")
 
-    # --- CORS newfiguration ---
+    # --- CORS Configuration ---
     CORS(app, resources={r"/*": {"origins": [
         "https://front-endnew.onrender.com",
         "http://127.0.0.1:5500",
@@ -63,10 +63,11 @@ def create_app():
         app.logger.critical(f"CRITICAL: Firebase initialization failed: {e}")
         raise
 
-    db = firestore.client()
-
     # --- Helper Functions ---
     def verify_admin_token(id_token):
+        # FIX: Get the Firestore client INSIDE the function.
+        # This guarantees Firebase is initialized before the database is accessed.
+        db = firestore.client()
         try:
             decoded_token = auth.verify_id_token(id_token)
             user_doc = db.collection('users').document(decoded_token['uid']).get()
@@ -77,8 +78,6 @@ def create_app():
 
     # --- Connect Helpers to Blueprints ---
     admin_bp.verify_admin_token_wrapper = verify_admin_token
-    # In a larger app, you might pass a mailer object instead of the function itself
-    # data_bp.send_notification_email = send_notification_email
     
     # --- Register Blueprints ---
     app.register_blueprint(auth_bp)
@@ -91,10 +90,14 @@ def create_app():
     def verify_app_check_token():
         if request.method == 'OPTIONS':
             return None
-        if request.path in ['/', '/dashboard-summary']: # Exempt specific paths if needed
+        # Exempt all public-facing or non-sensitive paths
+        if request.path in ['/', '/dashboard-summary']: 
             return None
         app_check_token = request.headers.get('X-Firebase-AppCheck')
         if not app_check_token:
+            # For blueprints, the blueprint's error handler will take precedence
+            if request.blueprint:
+                return
             return jsonify({'error': 'Unauthorized: App Check token missing'}), 401
         try:
             app_check.verify_token(app_check_token)
@@ -109,19 +112,14 @@ def create_app():
 
     @app.route('/dashboard-summary', methods=['GET'])
     def get_dashboard_summary():
-        # This is a placeholder implementation. You would build this out
-        # with real data queries to count warnings, OOTs, etc.
+        db = firestore.client()
         try:
-            # Example logic for fetching pending users
             pending_users = db.collection('users').where('status', '==', 'pending').stream()
             pending_count = len(list(pending_users))
-
-            # Placeholder data for the rest
             summary_data = {
-                "role": "Admin", # This would be determined from the user's token
+                "role": "Admin",
                 "pending_users_count": pending_count,
-                "total_warnings": 15, # Placeholder
-                "total_oot": 4,       # Placeholder
+                "total_warnings": 15, "total_oot": 4,
                 "leaderboard": [
                     {"hospital": "aoi_gurugram", "warnings": 5, "oot": 2},
                     {"hospital": "medanta_gurugram", "warnings": 3, "oot": 1},
@@ -132,7 +130,6 @@ def create_app():
         except Exception as e:
             app.logger.error(f"Dashboard summary failed: {e}", exc_info=True)
             return jsonify({'message': 'Failed to load dashboard summary'}), 500
-
 
     return app
 

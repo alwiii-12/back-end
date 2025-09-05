@@ -5,9 +5,7 @@ from datetime import datetime, timedelta
 import pytz
 import numpy as np
 
-db = firestore.client()
 logger = logging.getLogger(__name__)
-
 admin_bp = Blueprint('admin_bp', __name__, url_prefix='/admin')
 
 # This helper will be connected from the main app
@@ -15,12 +13,8 @@ verify_admin_token_wrapper = None
 
 @admin_bp.before_request
 def before_request_func():
-    # Allow OPTIONS requests to pass through for CORS preflight
     if request.method == 'OPTIONS':
         return None
-    
-    # Skip protection for specific, less sensitive routes if necessary
-    # For now, we protect all admin routes.
     
     auth_header = request.headers.get("Authorization")
     if not auth_header or "Bearer " not in auth_header:
@@ -28,23 +22,20 @@ def before_request_func():
 
     token = auth_header.split("Bearer ")[-1]
     
-    # Ensure the wrapper has been connected from app.py
     if verify_admin_token_wrapper:
         is_admin, _ = verify_admin_token_wrapper(token)
         if not is_admin:
             return jsonify({'message': 'Unauthorized: Admin access required'}), 403
     else:
-        # Failsafe if the wrapper isn't connected
         return jsonify({'message': 'Server configuration error: Auth wrapper not set'}), 500
-
 
 ## --- User Management Endpoints ---
 
 @admin_bp.route('/users', methods=['GET'])
 def get_all_users():
+    db = firestore.client()
     try:
         users_stream = db.collection("users").stream()
-        # Combine document data with the user's UID
         users_list = [doc.to_dict() | {"uid": doc.id} for doc in users_stream]
         return jsonify(users_list), 200
     except Exception as e:
@@ -53,6 +44,7 @@ def get_all_users():
 
 @admin_bp.route('/update-user', methods=['POST'])
 def update_user():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
@@ -60,13 +52,11 @@ def update_user():
             return jsonify({'message': 'User UID is required'}), 400
 
         updates = {}
-        # Validate and build the updates dictionary
         if "status" in content and content["status"] in ["active", "pending", "rejected"]:
             updates["status"] = content["status"]
         if "role" in content and content["role"] in ["Medical physicist", "RSO", "Admin"]:
             updates["role"] = content["role"]
         if "hospital" in content and content["hospital"].strip():
-            # When hospital name changes, centerId should also change
             hospital_name = content["hospital"].strip()
             updates["hospital"] = hospital_name
             updates["centerId"] = hospital_name.lower().replace(" ", "_")
@@ -75,36 +65,25 @@ def update_user():
             return jsonify({'message': 'No valid fields provided for update'}), 400
 
         db.collection("users").document(uid).update(updates)
-        
-        # Recommended: Add an audit log entry here for the update action
-        
         return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
     except Exception as e:
         logger.error(f"Update user failed: {e}", exc_info=True)
         return jsonify({'message': 'Failed to update user.'}), 500
 
-
 @admin_bp.route('/delete-user', methods=['DELETE'])
 def delete_user():
+    db = firestore.client()
     try:
         uid_to_delete = request.get_json(force=True).get("uid")
         if not uid_to_delete:
             return jsonify({'message': 'Missing UID for deletion'}), 400
         
-        # 1. Delete from Firebase Authentication
         try:
             auth.delete_user(uid_to_delete)
         except auth.UserNotFoundError:
-            logger.warning(f"User with UID {uid_to_delete} not found in Firebase Auth, but proceeding with Firestore deletion.")
-        except Exception as auth_e:
-            # Re-raise unexpected auth errors
-            raise auth_e
-
-        # 2. Delete from Firestore Database
-        db.collection("users").document(uid_to_delete).delete()
-
-        # Recommended: Add an audit log entry for the deletion action
+            logger.warning(f"User {uid_to_delete} not in Auth, deleting from Firestore.")
         
+        db.collection("users").document(uid_to_delete).delete()
         return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
     except Exception as e:
         logger.error(f"Delete user failed: {e}", exc_info=True)
@@ -114,10 +93,10 @@ def delete_user():
 
 @admin_bp.route('/hospital-data', methods=['GET'])
 def get_hospital_data():
-    """Endpoint for admins to view raw QA data for any hospital."""
+    db = firestore.client()
     try:
         hospital_id = request.args.get('hospitalId')
-        month_str = request.args.get('month') # e.g., '2025-08'
+        month_str = request.args.get('month')
         
         if not all([hospital_id, month_str]):
             return jsonify({'error': 'Missing hospitalId or month parameter'}), 400
@@ -127,74 +106,44 @@ def get_hospital_data():
         month_doc = month_doc_ref.get()
 
         if not month_doc.exists:
-            return jsonify({'data': {}}), 200 # Return empty data if no record for that month
+            return jsonify({'data': {}}), 200
 
         return jsonify({'data': month_doc.to_dict()}), 200
     except Exception as e:
         logger.error(f"Admin fetch hospital data failed: {e}", exc_info=True)
         return jsonify({'message': str(e)}), 500
 
-## --- FIX FOR SERVICE EFFICACY ANALYSIS ---
-
 def calculate_stability_metrics(data_points):
-    """
-    Calculates standard deviation from a list of data points.
-    Returns the standard deviation. Returns 0 if calculation is not possible.
-    """
-    # Ensure there are enough data points for a meaningful calculation
     if not data_points or len(data_points) < 2:
         return 0.0
-    
-    # Filter out None or non-numeric values before calculation
     valid_points = [float(p) for p in data_points if p is not None and isinstance(p, (int, float, str)) and str(p).replace('.', '', 1).isdigit()]
-    
     if len(valid_points) < 2:
         return 0.0
-        
     return np.std(valid_points)
 
 @admin_bp.route('/service-impact-analysis', methods=['GET'])
 def get_service_impact_analysis():
-    """
-    Analyzes the impact of a service event by comparing the standard deviation
-    of QA data 30 days before and 30 days after the event.
-    """
+    db = firestore.client()
     try:
-        # In a real application, you would query all users or centers.
-        # Here we use the hardcoded list from your predictive script for demonstration.
         center_ids = ["aoi_gurugram", "medanta_gurugram", "fortis_delhi", "apollo_chennai", "max_delhi"]
         data_types = ["output", "flatness", "inline", "crossline"]
-        
         all_results = []
 
         for center_id in center_ids:
-            # Find a user for the center to get service events
             users_ref = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
             user_uid = next((user.id for user in users_ref), None)
             
-            if not user_uid:
-                continue
+            if not user_uid: continue
 
             service_events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
             
             for event in service_events_ref:
                 service_date = datetime.strptime(event.id, '%Y-%m-%d')
-                
-                event_analysis = {
-                    "hospital": center_id,
-                    "service_date": event.id,
-                    "analysis": {}
-                }
-
-                # Define the 30-day window before and after the service date
+                event_analysis = {"hospital": center_id, "service_date": event.id, "analysis": {}}
                 before_start = service_date - timedelta(days=30)
                 after_end = service_date + timedelta(days=30)
-
-                # This is a complex query. We need to fetch data spanning multiple months.
-                # Simplified logic: fetch all data and filter in Python.
-                # A more optimized approach might use more targeted Firestore queries.
-                all_data_docs = db.collection("linac_data").document(center_id).collection("months").stream()
                 
+                all_data_docs = db.collection("linac_data").document(center_id).collection("months").stream()
                 center_data = {}
                 for doc in all_data_docs:
                     month_data = doc.to_dict()
@@ -208,17 +157,13 @@ def get_service_impact_analysis():
                             year, mon = map(int, month_str.split("-"))
                             for i, val in enumerate(row.get('values', [])):
                                 if val:
-                                    day = i + 1
                                     try:
-                                        current_date = datetime(year, mon, day)
+                                        current_date = datetime(year, mon, i + 1)
                                         center_data[data_type][energy].append({'date': current_date, 'value': val})
-                                    except ValueError:
-                                        continue
+                                    except ValueError: continue
                 
                 for data_type in data_types:
-                    # We'll analyze the primary energy type '6X' for simplicity
                     energy_data = center_data.get(data_type, {}).get('6X', [])
-                    
                     data_before = [d['value'] for d in energy_data if before_start <= d['date'] < service_date]
                     data_after = [d['value'] for d in energy_data if service_date < d['date'] <= after_end]
                     
@@ -226,50 +171,38 @@ def get_service_impact_analysis():
                     after_std = calculate_stability_metrics(data_after)
                     
                     improvement = 0.0
-                    if before_std > 0.0001:  # Use a small epsilon to avoid floating point issues
+                    if before_std > 0.0001:
                         improvement = ((before_std - after_std) / before_std) * 100.0
                     elif after_std > 0:
-                        improvement = -999.0  # Worsened from a perfect state
-
+                        improvement = -999.0
+                    
                     event_analysis["analysis"][data_type] = {
-                        "before_std": before_std,
-                        "after_std": after_std,
-                        "stability_improvement_percent": improvement
+                        "before_std": before_std, "after_std": after_std, "stability_improvement_percent": improvement
                     }
-                
                 all_results.append(event_analysis)
-            
         return jsonify(all_results), 200
     except Exception as e:
         logger.error(f"Service impact analysis failed: {e}", exc_info=True)
         return jsonify({'message': 'An error occurred during analysis.'}), 500
-        
-
-## --- Audit Log Endpoint ---
 
 @admin_bp.route('/audit-logs', methods=['GET'])
 def get_audit_logs():
+    db = firestore.client()
     try:
-        # Start with the base query, ordered by timestamp
         query = db.collection("audit_logs").order_by("timestamp", direction=firestore.Query.DESCENDING)
-        
-        # Apply optional filters from query parameters
         if request.args.get('hospitalId'):
             query = query.where('hospital', '==', request.args.get('hospitalId'))
         if request.args.get('action'):
             query = query.where('action', '==', request.args.get('action'))
         if request.args.get('date'):
-            # Filter by a specific day
             start_date = datetime.strptime(request.args.get('date'), '%Y-%m-%d')
             end_date = start_date + timedelta(days=1)
             query = query.where('timestamp', '>=', start_date).where('timestamp', '<', end_date)
 
-        # Limit the results to prevent excessive data transfer
         logs_stream = query.limit(200).stream()
         logs = []
         for doc in logs_stream:
             log_data = doc.to_dict()
-            # Format the timestamp for display in the frontend
             if 'timestamp' in log_data and hasattr(log_data['timestamp'], 'astimezone'):
                 log_data['timestamp'] = log_data['timestamp'].astimezone(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
             logs.append(log_data)

@@ -5,8 +5,6 @@ import logging
 logger = logging.getLogger(__name__)
 auth_bp = Blueprint('auth_bp', __name__, url_prefix='/auth')
 
-# Note: We will need to pass the 'get_real_ip' function from the main app.py
-# For now, we define a placeholder. This will be connected in the main app factory.
 def get_real_ip():
     if 'X-Forwarded-For' in request.headers:
         return request.headers['X-Forwarded-For'].split(',')[0].strip()
@@ -21,9 +19,11 @@ def signup():
         missing = [f for f in required if f not in user or not user.get(f, "").strip()]
         if missing:
             return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
+        
         user_ref = db.collection('users').document(user['uid'])
         if user_ref.get().exists:
             return jsonify({'status': 'error', 'message': 'User already exists'}), 409
+        
         user_ref.set({
             'name': user['name'],
             'email': user['email'].strip().lower(),
@@ -64,7 +64,6 @@ def login():
         if user_status != "active":
             return jsonify({'status': 'error', 'message': 'This account is not active.'}), 403
 
-        # --- AUDIT LOGGING ---
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
             "action": "user_login",
@@ -119,10 +118,7 @@ def update_profile():
             "timestamp": firestore.SERVER_TIMESTAMP,
             "userUid": uid,
             "action": "profile_self_update",
-            "changes": {
-                "name": new_name,
-                "hospital": new_hospital
-            }
+            "changes": {"name": new_name, "hospital": new_hospital}
         }
         db.collection("audit_logs").add(audit_entry)
         

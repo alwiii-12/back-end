@@ -27,7 +27,6 @@ def create_app():
     # --- Firebase Initialization ---
     try:
         firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
-        app.logger.info(f"Firebase credentials loaded: {'Yes' if firebase_json else 'No'}")
         if not firebase_json:
             raise ValueError("FIREBASE_CREDENTIALS environment variable not set.")
         firebase_dict = json.loads(firebase_json)
@@ -41,7 +40,8 @@ def create_app():
 
     # --- Helper Function for Admin Auth ---
     def verify_admin_token(id_token):
-        db = firestore.client() # FIX: Gets client inside the function to ensure app is initialized
+        # FIX: Gets the Firestore client inside the function to ensure the app is initialized.
+        db = firestore.client()
         try:
             decoded_token = auth.verify_id_token(id_token)
             user_doc = db.collection('users').document(decoded_token['uid']).get()
@@ -60,11 +60,9 @@ def create_app():
     # --- App Check Verification (Global) ---
     @app.before_request
     def verify_app_check_token():
-        # FIX: Allow all OPTIONS requests for CORS preflight
         if request.method == 'OPTIONS':
             return None
-        # Don't run checks on the root path
-        if request.path == '/':
+        if request.path in ['/', '/dashboard-summary']: # Exempt public paths
             return None
             
         app_check_token = request.headers.get('X-Firebase-AppCheck')
@@ -79,6 +77,12 @@ def create_app():
     @app.route('/')
     def index():
         return "✅ LINAC QA Backend is fully operational."
+    
+    # Placeholder for the /dashboard-summary endpoint
+    @app.route('/dashboard-summary', methods=['GET'])
+    def get_dashboard_summary():
+        return jsonify({"message": "Summary data placeholder"}), 200
+
 
     return app
 

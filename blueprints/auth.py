@@ -2,11 +2,7 @@ from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import logging
 
-# Get the database instance and a logger
-db = firestore.client()
 logger = logging.getLogger(__name__)
-
-# All routes in this file will be prefixed with /auth
 auth_bp = Blueprint('auth_bp', __name__, url_prefix='/auth')
 
 # Note: We will need to pass the 'get_real_ip' function from the main app.py
@@ -18,6 +14,7 @@ def get_real_ip():
 
 @auth_bp.route('/signup', methods=['POST'])
 def signup():
+    db = firestore.client()
     try:
         user = request.get_json(force=True)
         required = ['name', 'email', 'hospital', 'role', 'uid', 'status']
@@ -32,18 +29,17 @@ def signup():
             'email': user['email'].strip().lower(),
             'hospital': user['hospital'],
             'role': user['role'],
-            'centerId': user['hospital'],
+            'centerId': user['hospital'].lower().replace(" ", "_"),
             'status': user['status']
         })
         return jsonify({'status': 'success', 'message': 'User registered'}), 200
     except Exception as e:
         logger.error(f"Signup failed: {str(e)}", exc_info=True)
-        # Assuming sentry is configured in the main app
-        # sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid = content.get("uid", "").strip()
@@ -97,6 +93,7 @@ def login():
 
 @auth_bp.route('/update-profile', methods=['POST'])
 def update_profile():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
@@ -113,7 +110,7 @@ def update_profile():
         updates = {
             'name': new_name,
             'hospital': new_hospital,
-            'centerId': new_hospital
+            'centerId': new_hospital.lower().replace(" ", "_")
         }
         
         user_ref.update(updates)
@@ -138,6 +135,7 @@ def update_profile():
 
 @auth_bp.route('/log_event', methods=['POST'])
 def log_event():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         action = content.get("action")
@@ -151,7 +149,7 @@ def log_event():
         
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
-            "action": action, # e.g., 'user_logout'
+            "action": action,
             "targetUserUid": user_uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {

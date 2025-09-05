@@ -4,25 +4,17 @@ import logging
 from calendar import monthrange
 import json
 
-# Get the database instance and a logger
-db = firestore.client()
 logger = logging.getLogger(__name__)
-
-# All routes in this file will be prefixed with /data
 data_bp = Blueprint('data_bp', __name__, url_prefix='/data')
 
-# Constants can be shared or redefined here
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
 
-# A placeholder for the email function, which we will connect from the main app
-def send_notification_email(recipient_email, subject, body):
-    # This will be replaced by the real function from app.py
-    logger.info(f"--- MOCK EMAIL to {recipient_email} --- \nSubject: {subject}\nBody: {body}")
-    return True
+send_notification_email = None
 
 @data_bp.route('/save-annotation', methods=['POST'])
 def save_annotation():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid, month, key, data = content.get("uid"), content.get("month"), content.get("key"), content.get("data")
@@ -45,6 +37,7 @@ def save_annotation():
 
 @data_bp.route('/delete-annotation', methods=['POST'])
 def delete_annotation():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid, month, key = content.get("uid"), content.get("month"), content.get("key")
@@ -64,6 +57,7 @@ def delete_annotation():
 
 @data_bp.route('/save', methods=['POST'])
 def save_data():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid, month_param, raw_data, data_type = content.get("uid"), content.get("month"), content.get("data"), content.get("dataType")
@@ -90,6 +84,7 @@ def save_data():
 
 @data_bp.route('/fetch', methods=['GET'])
 def get_data():
+    db = firestore.client()
     try:
         month_param, uid, data_type = request.args.get('month'), request.args.get('uid'), request.args.get('dataType')
         if not all([month_param, uid, data_type]): return jsonify({'error': 'Missing parameters'}), 400
@@ -121,6 +116,7 @@ def get_data():
 
 @data_bp.route('/send-alert', methods=['POST'])
 def send_alert():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
@@ -157,7 +153,7 @@ def send_alert():
         else:
             message_body += f"All previously detected issues for {data_type_display} are resolved.\n"
 
-        if send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital}", message_body):
+        if send_notification_email and send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital}", message_body):
             alerts_ref.set({"alerted_values": content.get("outValues", [])})
             return jsonify({'status': 'alert sent'}), 200
         else:

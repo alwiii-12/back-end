@@ -13,21 +13,20 @@ verify_admin_token_wrapper = None
 
 @admin_bp.before_request
 def before_request_func():
+    # FIX: Explicitly allow all OPTIONS requests for CORS preflight
     if request.method == 'OPTIONS':
-        return None
-    
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or "Bearer " not in auth_header:
-        return jsonify({'message': 'Authorization header is missing or invalid'}), 401
+        return None # Let Flask-Cors handle the response
 
-    token = auth_header.split("Bearer ")[-1]
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
     
+    # Ensure the wrapper has been connected from app.py
     if verify_admin_token_wrapper:
         is_admin, _ = verify_admin_token_wrapper(token)
         if not is_admin:
-            return jsonify({'message': 'Unauthorized: Admin access required'}), 403
+            return jsonify({'message': 'Unauthorized'}), 403
     else:
-        return jsonify({'message': 'Server configuration error: Auth wrapper not set'}), 500
+        # Failsafe if the wrapper isn't connected
+        return jsonify({'message': 'Server configuration error'}), 500
 
 ## --- User Management Endpoints ---
 

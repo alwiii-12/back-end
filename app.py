@@ -3,15 +3,8 @@ import json
 import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import jwt
-
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, app_check
-import sentry_sdk
-from sentry_sdk.integrations.flask import FlaskIntegration
 
 # --- BLUEPRINT IMPORTS ---
 from blueprints.auth import auth_bp
@@ -19,17 +12,9 @@ from blueprints.data import data_bp
 from blueprints.forecasting import forecasting_bp
 from blueprints.admin import admin_bp
 
-# ==============================================================================
-# --- APPLICATION FACTORY FUNCTION ---
-# ==============================================================================
-
 def create_app():
-    """Creates and configures the Flask application."""
     app = Flask(__name__)
     app.logger.setLevel(logging.DEBUG)
-
-    # --- Sentry Initialization ---
-    # (Sentry code remains the same)
 
     # --- CORS Configuration ---
     CORS(app, resources={r"/*": {"origins": [
@@ -41,11 +26,7 @@ def create_app():
     # --- Firebase Initialization ---
     try:
         firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
-        
-        # --- NEW DEBUG LINE ---
-        # This will show up in your Render logs.
         app.logger.info(f"Firebase credentials loaded: {'Yes' if firebase_json else 'No'}")
-
         if not firebase_json:
             raise ValueError("FIREBASE_CREDENTIALS environment variable not set.")
         firebase_dict = json.loads(firebase_json)
@@ -57,9 +38,9 @@ def create_app():
         app.logger.critical(f"CRITICAL: Firebase initialization failed: {e}")
         raise
 
-    # --- Helper Functions ---
+    # --- Helper Function for Admin Auth ---
     def verify_admin_token(id_token):
-        db = firestore.client()
+        db = firestore.client() # FIX: Gets client inside the function
         try:
             decoded_token = auth.verify_id_token(id_token)
             user_doc = db.collection('users').document(decoded_token['uid']).get()
@@ -68,25 +49,23 @@ def create_app():
             app.logger.error(f"Token verification failed: {e}", exc_info=True)
         return False, None
 
-    # Connect helpers and register blueprints...
+    # --- Connect Helpers and Register Blueprints ---
     admin_bp.verify_admin_token_wrapper = verify_admin_token
     app.register_blueprint(auth_bp)
     app.register_blueprint(data_bp)
     app.register_blueprint(forecasting_bp)
     app.register_blueprint(admin_bp)
 
-    # All other functions remain the same...
-    # (@app.before_request, @app.route('/'), @app.route('/dashboard-summary'), etc.)
-
+    # --- App Check Verification (Global) ---
     @app.before_request
     def verify_app_check_token():
         if request.method == 'OPTIONS':
             return None
-        if request.path in ['/', '/dashboard-summary']: 
+        if request.path in ['/']:
             return None
+            
         app_check_token = request.headers.get('X-Firebase-AppCheck')
         if not app_check_token:
-            if request.blueprint: return
             return jsonify({'error': 'Unauthorized: App Check token missing'}), 401
         try:
             app_check.verify_token(app_check_token)
@@ -96,33 +75,10 @@ def create_app():
 
     @app.route('/')
     def index():
-        return "✅ LINAC QA Backend Running (Refactored)"
-
-    @app.route('/dashboard-summary', methods=['GET'])
-    def get_dashboard_summary():
-        db = firestore.client()
-        try:
-            pending_users = db.collection('users').where('status', '==', 'pending').stream()
-            pending_count = len(list(pending_users))
-            summary_data = {
-                "role": "Admin", "pending_users_count": pending_count,
-                "total_warnings": 15, "total_oot": 4,
-                "leaderboard": [
-                    {"hospital": "aoi_gurugram", "warnings": 5, "oot": 2},
-                    {"hospital": "medanta_gurugram", "warnings": 3, "oot": 1},
-                    {"hospital": "max_delhi", "warnings": 7, "oot": 1},
-                ]
-            }
-            return jsonify(summary_data), 200
-        except Exception as e:
-            app.logger.error(f"Dashboard summary failed: {e}", exc_info=True)
-            return jsonify({'message': 'Failed to load dashboard summary'}), 500
+        return "✅ LINAC QA Backend is fully operational."
 
     return app
 
-# ==============================================================================
-# --- WSGI ENTRY POINT ---
-# ==============================================================================
 app = create_app()
 
 if __name__ == '__main__':

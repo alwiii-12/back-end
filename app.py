@@ -13,6 +13,7 @@ from blueprints.forecasting import forecasting_bp
 from blueprints.admin import admin_bp
 
 def create_app():
+    """Creates and configures the Flask application."""
     app = Flask(__name__)
     app.logger.setLevel(logging.DEBUG)
 
@@ -40,7 +41,7 @@ def create_app():
 
     # --- Helper Function for Admin Auth ---
     def verify_admin_token(id_token):
-        db = firestore.client() # FIX: Gets client inside the function
+        db = firestore.client() # FIX: Gets client inside the function to ensure app is initialized
         try:
             decoded_token = auth.verify_id_token(id_token)
             user_doc = db.collection('users').document(decoded_token['uid']).get()
@@ -59,9 +60,11 @@ def create_app():
     # --- App Check Verification (Global) ---
     @app.before_request
     def verify_app_check_token():
+        # FIX: Allow all OPTIONS requests for CORS preflight
         if request.method == 'OPTIONS':
             return None
-        if request.path in ['/']:
+        # Don't run checks on the root path
+        if request.path == '/':
             return None
             
         app_check_token = request.headers.get('X-Firebase-AppCheck')

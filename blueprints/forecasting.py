@@ -6,13 +6,12 @@ from prophet import Prophet
 from calendar import monthrange
 from datetime import timedelta
 
-db = firestore.client()
 logger = logging.getLogger(__name__)
-
 forecasting_bp = Blueprint('forecasting_bp', __name__, url_prefix='/forecast')
 
 @forecasting_bp.route('/predictions', methods=['GET'])
 def get_predictions():
+    db = firestore.client()
     try:
         uid, data_type, energy, month = request.args.get('uid'), request.args.get('dataType'), request.args.get('energy'), request.args.get('month')
         if not all([uid, data_type, energy, month]):
@@ -23,17 +22,20 @@ def get_predictions():
         center_id = user_doc.to_dict().get("centerId")
         if not center_id: return jsonify({'error': 'User has no center'}), 400
 
-        prediction_doc = db.collection("linac_predictions").document(f"{center_id}_{data_type}_{energy}_{month}").get()
+        prediction_doc_id = f"{center_id}_{data_type}_{energy}_{month}"
+        prediction_doc = db.collection("linac_predictions").document(prediction_doc_id).get()
+        
         if prediction_doc.exists:
             return jsonify(prediction_doc.to_dict()), 200
         else:
-            return jsonify({'error': f'Prediction not found'}), 404
+            return jsonify({'error': 'Prediction not found'}), 404
     except Exception as e:
         logger.error(f"Get predictions error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @forecasting_bp.route('/historical', methods=['POST'])
 def get_historical_forecast():
+    db = firestore.client()
     try:
         content = request.get_json(force=True)
         uid, month_param, data_type, energy = content.get('uid'), content.get('month'), content.get('dataType'), content.get('energy')
@@ -44,7 +46,6 @@ def get_historical_forecast():
         if not user_doc.exists: return jsonify({'error': 'User not found'}), 404
         center_id = user_doc.to_dict().get("centerId")
 
-        # Fetch data for training
         months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
         all_values = []
         end_date_for_training = pd.to_datetime(month_param) - timedelta(days=1)
@@ -64,14 +65,12 @@ def get_historical_forecast():
         
         if len(all_values) < 10: return jsonify({'error': 'Not enough historical data.'}), 404
         
-        # Train and predict
         df_train = pd.DataFrame(all_values).drop_duplicates(subset='ds', keep='last')
         model = Prophet().fit(df_train)
         year, mon = map(int, month_param.split("-"))
         future = model.make_future_dataframe(periods=monthrange(year, mon)[1], freq='D')
         forecast_df = model.predict(future)
         
-        # Filter for the requested month
         forecast_df = forecast_df[forecast_df['ds'].dt.strftime('%Y-%m') == month_param]
 
         return jsonify({

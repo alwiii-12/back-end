@@ -346,6 +346,25 @@ def update_profile():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- DATA & ALERT ENDPOINTS ---
+def create_proactive_chat(uid, data_type, energy, value):
+    """Creates a proactive chat message in Firestore when a warning is detected."""
+    topic = None
+    if data_type == "output":
+        topic = "output_drift"
+    elif data_type in ["flatness", "inline", "crossline"]:
+        topic = "symmetry_horn_fault" 
+    
+    if topic:
+        chat_ref = db.collection('proactive_chats').document()
+        chat_ref.set({
+            'uid': uid,
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'read': False,
+            'topic': topic,
+            'initial_message': f"I noticed a QA value in the warning range for {data_type.title()} on {energy} (value: {value}%). Would you like me to help diagnose the issue?"
+        })
+        app.logger.info(f"Created proactive chat for user {uid} regarding {data_type} warning.")
+
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -379,6 +398,23 @@ def save_data():
         doc_ref = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id)
         doc_ref.set({firestore_field_name: converted}, merge=True)
         
+        # --- Proactive Chat Logic ---
+        config = DATA_TYPE_CONFIGS.get(data_type)
+        if config:
+            warning_found = False
+            for item in converted:
+                if warning_found: break
+                energy = item.get("energy")
+                for value_str in item.get("values", []):
+                    try:
+                        value = float(value_str)
+                        if config["warning"] < abs(value) <= config["tolerance"]:
+                            create_proactive_chat(uid, data_type, energy, value)
+                            warning_found = True
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
         return jsonify({'status': 'success', 'message': f'{data_type} data saved successfully'}), 200
 
     except Exception as e:
@@ -524,104 +560,6 @@ def get_predictions():
             
     except Exception as e:
         app.logger.error(f"Get predictions failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/update-live-forecast', methods=['POST'])
-def update_live_forecast():
-    try:
-        content = request.get_json(force=True)
-        uid = content.get('uid')
-        month_param = content.get('month')
-        data_type = content.get('dataType')
-        energy = content.get('energy')
-
-        if not all([uid, month_param, data_type, energy]):
-            return jsonify({'error': 'Missing required parameters'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-
-        # 1. Fetch all historical data
-        months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
-        all_values = []
-        for month_doc in months_ref:
-            month_id_str = month_doc.id.replace("Month_", "")
-            month_data = month_doc.to_dict()
-            field_name = f"data_{data_type}"
-            if field_name in month_data:
-                year, mon = map(int, month_id_str.split("-"))
-                for row_data in month_data[field_name]:
-                    if row_data.get("energy") == energy:
-                        for i, value in enumerate(row_data.get("values", [])):
-                            day = i + 1
-                            try:
-                                if value and day <= monthrange(year, mon)[1]:
-                                    date = pd.to_datetime(f"{year}-{mon}-{day}")
-                                    if date <= pd.Timestamp.now():
-                                        all_values.append({"ds": date, "y": float(value)})
-                            except (ValueError, TypeError):
-                                continue
-        
-        df_for_training = pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
-        
-        if len(df_for_training) < 5:
-            return jsonify({'error': 'Not enough historical data.'}), 404
-
-        # 2. Fetch service events
-        service_events_df = None
-        events = []
-        events_ref = db.collection('service_events').document(uid).collection('events').stream()
-        for event in events_ref:
-            events.append(event.id)
-        if events:
-            service_events_df = pd.DataFrame({
-                'holiday': 'service_day',
-                'ds': pd.to_datetime(events),
-                'lower_window': 0,
-                'upper_window': 1,
-            })
-
-        # 3. Train model and create forecast
-        model = Prophet(holidays=service_events_df)
-        model.fit(df_for_training)
-        
-        last_known_date = df_for_training['ds'].max()
-        future = model.make_future_dataframe(periods=31)
-        forecast_df = model.predict(future)
-        
-        final_forecast = forecast_df[forecast_df['ds'] >= last_known_date]
-
-        # 4. Save the new forecast to Firestore, overwriting the old one
-        prediction_doc_id = f"{center_id}_{data_type}_{energy}_{month_param}"
-        doc_ref = db.collection("linac_predictions").document(prediction_doc_id)
-        
-        forecast_data = []
-        for _, row in final_forecast.iterrows():
-            if row['ds'].strftime('%Y-%m') == month_param:
-                forecast_data.append({
-                    "date": row['ds'].strftime('%Y-%m-%d'),
-                    "predicted_value": row['yhat'],
-                    "lower_bound": row['yhat_lower'],
-                    "upper_bound": row['yhat_upper']
-                })
-        
-        doc_ref.set({
-            "centerId": center_id,
-            "dataType": data_type,
-            "energy": energy,
-            "forecastMonth": month_param,
-            "forecast": forecast_data,
-            "lastUpdated": firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({'status': 'success', 'message': 'Live forecast updated successfully'}), 200
-
-    except Exception as e:
-        app.logger.error(f"Live forecast update failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
@@ -786,12 +724,12 @@ def query_qa_data():
         if 'drift' in user_query_text or 'output' in user_query_text:
             topic = 'output_drift'
         elif 'flatness' in user_query_text or 'symmetry' in user_query_text:
-            topic = 'flatness_warning'
+            topic = 'symmetry_horn_fault'
         else:
             for keyword, path in kb.get("maintenance_info", {}).items():
                  if keyword.replace("_", " ") in user_query_text:
                      return jsonify({'status': 'success', 'message': path}), 200
-            return jsonify({'status': 'error', 'message': "I can help diagnose issues with 'output drift' or 'flatness'. What would you like to diagnose?"}), 404
+            return jsonify({'status': 'error', 'message': "I can help diagnose issues with 'output drift' or 'flatness/symmetry'. What would you like to diagnose?"}), 404
 
         troubleshooting_flow = kb.get("troubleshooting", {}).get(topic)
         if not troubleshooting_flow:
@@ -885,7 +823,7 @@ def log_event():
         
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
-            "action": action, # e.g., 'user_logout'
+            "action": action,
             "targetUserUid": user_uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
@@ -936,22 +874,14 @@ def calculate_hospital_metrics(center_id, period_days=90):
                         except (ValueError, TypeError):
                             continue
     
-    results = {
-        "hospital": center_id,
-        "warnings": warnings,
-        "oots": oots,
-        "metrics": {}
-    }
+    results = { "hospital": center_id, "warnings": warnings, "oots": oots, "metrics": {} }
     for data_type, values in all_numeric_values.items():
         if values:
             results["metrics"][data_type] = {
-                "mean_deviation": np.nanmean(values),
-                "std_deviation": np.nanstd(values),
-                "data_points": len(values)
+                "mean_deviation": np.nanmean(values), "std_deviation": np.nanstd(values), "data_points": len(values)
             }
         else:
             results["metrics"][data_type] = { "mean_deviation": 0, "std_deviation": 0, "data_points": 0 }
-            
     return results
 
 @app.route('/admin/benchmark-metrics', methods=['GET'])
@@ -963,19 +893,11 @@ def get_benchmark_metrics():
 
     try:
         period = int(request.args.get('period', 90))
-        
         users_ref = db.collection('users').stream()
         unique_hospitals = sorted(list({user.to_dict().get('hospital') for user in users_ref if user.to_dict().get('hospital')}))
-
-        benchmark_data = []
-        for hospital in unique_hospitals:
-            metrics = calculate_hospital_metrics(hospital, period_days=period)
-            benchmark_data.append(metrics)
-        
+        benchmark_data = [calculate_hospital_metrics(hospital, period_days=period) for hospital in unique_hospitals]
         benchmark_data.sort(key=lambda x: (x['oots'], x['warnings']), reverse=True)
-
         return jsonify(benchmark_data), 200
-
     except Exception as e:
         app.logger.error(f"Error getting benchmark metrics: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
@@ -1005,67 +927,36 @@ def update_user_status():
         return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
-        
+        uid, new_status, new_role, new_hospital = content.get("uid"), content.get("status"), content.get("role"), content.get("hospital")
         requesting_admin_uid = content.get("admin_uid", admin_uid_from_token) 
 
-        new_status = content.get("status")
-        new_role = content.get("role")
-        new_hospital = content.get("hospital")
-
-        if not uid:
-            return jsonify({'message': 'UID is required'}), 400
+        if not uid: return jsonify({'message': 'UID is required'}), 400
         
         updates = {}
-        if new_status is not None and new_status in ["active", "pending", "rejected"]:
-            updates["status"] = new_status
-        if new_role is not None and new_role in ["Medical physicist", "RSO", "Admin"]:
-            updates["role"] = new_role
-        if new_hospital is not None and new_hospital.strip() != "":
+        if new_status in ["active", "pending", "rejected"]: updates["status"] = new_status
+        if new_role in ["Medical physicist", "RSO", "Admin"]: updates["role"] = new_role
+        if new_hospital and new_hospital.strip() != "":
             updates["hospital"] = new_hospital
             updates["centerId"] = new_hospital
 
-        if not updates:
-            return jsonify({'message': 'No valid fields provided for update'}), 400
+        if not updates: return jsonify({'message': 'No valid fields provided for update'}), 400
 
-        ref = db.collection("users").document(uid)
-        
-        old_user_doc = ref.get()
+        ref, old_user_doc = db.collection("users").document(uid), ref.get()
         old_user_data = old_user_doc.to_dict() if old_user_doc.exists else {}
-
         ref.update(updates)
 
-        audit_entry = {
-            "timestamp": firestore.SERVER_TIMESTAMP,
-            "adminUid": requesting_admin_uid,
-            "action": "user_update",
-            "targetUserUid": uid,
-            "changes": {},
-            "oldData": {},
-            "newData": {},
-            "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")
-        }
-
-        if "status" in updates:
-            audit_entry["changes"]["status"] = {"old": old_user_data.get("status"), "new": updates["status"]}
-        if "role" in updates:
-            audit_entry["changes"]["role"] = {"old": old_user_data.get("role"), "new": updates["role"]}
-        if "hospital" in updates:
-            audit_entry["changes"]["hospital"] = {"old": old_user_data.get("hospital"), "new": updates["hospital"]}
-        
+        audit_entry = {"timestamp": firestore.SERVER_TIMESTAMP, "adminUid": requesting_admin_uid, "action": "user_update", "targetUserUid": uid, "changes": {}, "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")}
+        if "status" in updates: audit_entry["changes"]["status"] = {"old": old_user_data.get("status"), "new": updates["status"]}
+        if "role" in updates: audit_entry["changes"]["role"] = {"old": old_user_data.get("role"), "new": updates["role"]}
+        if "hospital" in updates: audit_entry["changes"]["hospital"] = {"old": old_user_data.get("hospital"), "new": updates["hospital"]}
         db.collection("audit_logs").add(audit_entry)
-        app.logger.info(f"Audit: User {uid} updated by {requesting_admin_uid}")
-
+        
         updated_user_data = ref.get().to_dict()
         if updated_user_data.get("email"):
-            subject = "LINAC QA Account Update"
-            body = "Your LINAC QA account details have been updated."
-            if "status" in updates:
-                body += f"\nYour account status is now: {updates['status'].upper()}."
-            if "role" in updates:
-                 body += f"\nYour role has been updated to: {updates['role']}."
-            if "hospital" in updates:
-                 body += f"\nYour hospital has been updated to: {updates['hospital']}."
+            subject, body = "LINAC QA Account Update", "Your LINAC QA account details have been updated."
+            if "status" in updates: body += f"\nYour account status is now: {updates['status'].upper()}."
+            if "role" in updates: body += f"\nYour role has been updated to: {updates['role']}."
+            if "hospital" in updates: body += f"\nYour hospital has been updated to: {updates['hospital']}."
             send_notification_email(updated_user_data["email"], subject, body)
 
         return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
@@ -1084,36 +975,20 @@ def delete_user():
 
     try:
         content = request.get_json(force=True)
-        uid_to_delete = content.get("uid")
-        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token)
-
-        if not uid_to_delete:
-            return jsonify({'message': 'Missing UID for deletion'}), 400
+        uid_to_delete, requesting_admin_uid = content.get("uid"), content.get("admin_uid", admin_uid_from_token)
+        if not uid_to_delete: return jsonify({'message': 'Missing UID for deletion'}), 400
 
         user_doc_ref = db.collection("users").document(uid_to_delete)
         user_data_to_log = user_doc_ref.get().to_dict() or {}
-
-        try:
-            auth.delete_user(uid_to_delete)
+        try: auth.delete_user(uid_to_delete)
         except Exception as e:
             if "User record not found" not in str(e):
                 app.logger.error(f"Error deleting Firebase Auth user {uid_to_delete}: {str(e)}", exc_info=True)
                 return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
-
         user_doc_ref.delete()
         
-        audit_entry = {
-            "timestamp": firestore.SERVER_TIMESTAMP,
-            "adminUid": requesting_admin_uid,
-            "action": "user_deletion",
-            "targetUserUid": uid_to_delete,
-            "deletedUserData": user_data_to_log
-        }
-        db.collection("audit_logs").add(audit_entry)
-        app.logger.info(f"Audit: User {uid_to_delete} deleted by {requesting_admin_uid}")
-
+        db.collection("audit_logs").add({"timestamp": firestore.SERVER_TIMESTAMP, "adminUid": requesting_admin_uid, "action": "user_deletion", "targetUserUid": uid_to_delete, "deletedUserData": user_data_to_log})
         return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
-
     except Exception as e:
         app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
@@ -1128,34 +1003,22 @@ def get_hospital_data():
         return jsonify({'message': 'Unauthorized'}), 403
 
     try:
-        hospital_id = request.args.get('hospitalId')
-        month_param = request.args.get('month')
+        hospital_id, month_param = request.args.get('hospitalId'), request.args.get('month')
         if not hospital_id or not month_param:
             return jsonify({'error': 'Missing hospitalId or month parameter'}), 400
-
-        center_id = hospital_id
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
-        
         all_data = {}
         for data_type in DATA_TYPES:
-            doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
-            doc = doc_ref.get()
-            
+            doc = db.collection("linac_data").document(hospital_id).collection("months").document(f"Month_{month_param}").get()
             energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
             if doc.exists:
-                firestore_field_name = f"data_{data_type}"
-                doc_data = doc.to_dict().get(firestore_field_name, [])
+                doc_data = doc.to_dict().get(f"data_{data_type}", [])
                 for row in doc_data:
                     energy, values = row.get("energy"), row.get("values", [])
-                    if energy in energy_dict:
-                        energy_dict[energy] = (values + [""] * num_days)[:num_days]
-
-            table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
-            all_data[data_type] = table
-
+                    if energy in energy_dict: energy_dict[energy] = (values + [""] * num_days)[:num_days]
+            all_data[data_type] = [[e] + energy_dict[e] for e in ENERGY_TYPES]
         return jsonify({'data': all_data}), 200
-
     except Exception as e:
         app.logger.error(f"Admin get hospital data failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
@@ -1171,68 +1034,39 @@ def get_audit_logs():
 
     try:
         logs_query = db.collection("audit_logs").order_by("timestamp", direction=firestore.Query.DESCENDING)
-
-        hospital_id = request.args.get('hospitalId')
-        action = request.args.get('action')
-        date_str = request.args.get('date')
-
-        if hospital_id:
-            logs_query = logs_query.where('hospital', '==', hospital_id)
-        if action:
-            logs_query = logs_query.where('action', '==', action)
+        hospital_id, action, date_str = request.args.get('hospitalId'), request.args.get('action'), request.args.get('date')
+        if hospital_id: logs_query = logs_query.where('hospital', '==', hospital_id)
+        if action: logs_query = logs_query.where('action', '==', action)
         if date_str:
             start_dt = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=pytz.UTC)
-            end_dt = start_dt + timedelta(days=1)
-            logs_query = logs_query.where('timestamp', '>=', start_dt).where('timestamp', '<', end_dt)
+            logs_query = logs_query.where('timestamp', '>=', start_dt).where('timestamp', '<', start_dt + timedelta(days=1))
         
-        logs_query = logs_query.limit(200)
-        logs_snapshot = logs_query.stream()
-
         logs = []
         user_cache = {}
-        for doc in logs_snapshot:
+        for doc in logs_query.limit(200).stream():
             log_data = doc.to_dict()
-            if 'timestamp' in log_data and isinstance(log_data['timestamp'], datetime):
-                log_data['timestamp'] = log_data['timestamp'].astimezone(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
-            
+            if 'timestamp' in log_data: log_data['timestamp'] = log_data['timestamp'].astimezone(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
             user_uid = log_data.get('userUid') or log_data.get('adminUid') or log_data.get('targetUserUid')
             if user_uid:
                 if user_uid in user_cache:
                     log_data['user_display'] = user_cache[user_uid]
                 else:
                     user_doc = db.collection('users').document(user_uid).get()
+                    display_string = user_uid
                     if user_doc.exists:
                         user_data = user_doc.to_dict()
-                        user_name = user_data.get('name', user_uid)
-                        user_email = user_data.get('email', '')
-                        user_hospital = user_data.get('hospital', 'N/A')
-                        display_string = f"{user_name} ({user_email})\n{user_hospital}"
-                        log_data['user_display'] = display_string
-                        user_cache[user_uid] = display_string
-                    else:
-                        log_data['user_display'] = user_uid
-                        user_cache[user_uid] = user_uid
-            
+                        display_string = f"{user_data.get('name', user_uid)} ({user_data.get('email', '')})\n{user_data.get('hospital', 'N/A')}"
+                    log_data['user_display'], user_cache[user_uid] = display_string, display_string
             logs.append(log_data)
-        
         return jsonify({"logs": logs}), 200
-
     except Exception as e:
         app.logger.error(f"Error loading audit logs: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-# --- [NEW] HELPER FUNCTION FOR SERVICE ANALYSIS ---
 def fetch_data_for_period(hospital_id, start_date, end_date):
-    """
-    Fetches all 'output' data for a hospital within a specific date range,
-    spanning across monthly documents if necessary.
-    """
-    data_points = {}
-    
-    # Determine the months to query
-    months_to_check = set()
+    data_points, months_to_check = {}, set()
     current_date = start_date
     while current_date <= end_date:
         months_to_check.add(current_date.strftime("Month_%Y-%m"))
@@ -1240,108 +1074,55 @@ def fetch_data_for_period(hospital_id, start_date, end_date):
     
     for month_doc_id in months_to_check:
         month_doc = db.collection("linac_data").document(hospital_id).collection("months").document(month_doc_id).get()
-        if not month_doc.exists:
-            continue
+        if not month_doc.exists: continue
         
-        month_data = month_doc.to_dict().get("data_output", [])
-        month_str = month_doc_id.replace("Month_", "")
-        
-        for row in month_data:
+        for row in month_doc.to_dict().get("data_output", []):
             energy = row.get("energy")
-            if energy not in data_points:
-                data_points[energy] = []
-                
+            if energy not in data_points: data_points[energy] = []
             for i, value in enumerate(row.get("values", [])):
-                day = i + 1
                 try:
-                    current_point_date = datetime.strptime(f"{month_str}-{day}", "%Y-%m-%d")
-                    if start_date <= current_point_date <= end_date:
-                        if value not in [None, '']:
-                            data_points[energy].append(float(value))
-                except (ValueError, TypeError):
-                    continue
-                    
+                    point_date = datetime.strptime(f"{month_doc_id.replace('Month_', '')}-{i+1}", "%Y-%m-%d")
+                    if start_date <= point_date <= end_date and value not in [None, '']:
+                        data_points[energy].append(float(value))
+                except (ValueError, TypeError): continue
     return data_points
 
-
-# --- [NEW] SERVICE IMPACT ANALYSIS ENDPOINT ---
 @app.route('/admin/service-impact-analysis', methods=['GET'])
 def get_service_impact_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
     is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
+    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
 
     hospital_id = request.args.get('hospitalId')
-    if not hospital_id:
-        return jsonify({'message': 'hospitalId is required'}), 400
+    if not hospital_id: return jsonify({'message': 'hospitalId is required'}), 400
 
     try:
-        # Find a user for the given hospital to locate service events
         users_query = db.collection('users').where('hospital', '==', hospital_id).limit(1).stream()
         user_uid = next((user.id for user in users_query), None)
-        
-        if not user_uid:
-            return jsonify([]) # Return empty list if no user/events found
+        if not user_uid: return jsonify([])
 
-        service_events_ref = db.collection('service_events').document(user_uid).collection('events')
-        service_events = service_events_ref.stream()
-        
         analysis_results = []
-
-        for event in service_events:
+        for event in db.collection('service_events').document(user_uid).collection('events').stream():
             service_date = datetime.strptime(event.id, "%Y-%m-%d")
-            
-            # Define before and after periods
-            before_start = service_date - timedelta(days=14)
-            before_end = service_date - timedelta(days=1)
-            after_start = service_date + timedelta(days=1)
-            after_end = service_date + timedelta(days=14)
-            
-            # Fetch data for both periods
-            before_data_by_energy = fetch_data_for_period(hospital_id, before_start, before_end)
-            after_data_by_energy = fetch_data_for_period(hospital_id, after_start, after_end)
+            before_data = fetch_data_for_period(hospital_id, service_date - timedelta(days=14), service_date - timedelta(days=1))
+            after_data = fetch_data_for_period(hospital_id, service_date + timedelta(days=1), service_date + timedelta(days=14))
 
-            processed_energies = set(before_data_by_energy.keys()) | set(after_data_by_energy.keys())
+            for energy in set(before_data.keys()) | set(after_data.keys()):
+                before_values, after_values = before_data.get(energy, []), after_data.get(energy, [])
+                if not before_values or not after_values: continue
 
-            for energy in processed_energies:
-                before_values = before_data_by_energy.get(energy, [])
-                after_values = after_data_by_energy.get(energy, [])
+                before_std, after_std = np.std(before_values), np.std(after_values)
+                improvement = ((before_std - after_std) / before_std) * 100 if before_std > 0 else 0
                 
-                if not before_values or not after_values:
-                    continue
-
-                # Calculate metrics
-                before_metrics = {
-                    "mean_deviation": np.mean(before_values),
-                    "std_deviation": np.std(before_values)
-                }
-                after_metrics = {
-                    "mean_deviation": np.mean(after_values),
-                    "std_deviation": np.std(after_values)
-                }
-                
-                # Calculate improvement
-                improvement = 0
-                if before_metrics["std_deviation"] > 0:
-                    improvement = ((before_metrics["std_deviation"] - after_metrics["std_deviation"]) / before_metrics["std_deviation"]) * 100
-
                 analysis_results.append({
-                    "hospital": hospital_id,
-                    "service_date": event.id,
-                    "energy": energy,
-                    "before_metrics": before_metrics,
-                    "after_metrics": after_metrics,
+                    "service_date": event.id, "energy": energy,
+                    "before_metrics": {"std_deviation": before_std},
+                    "after_metrics": {"std_deviation": after_std},
                     "stability_improvement_percent": improvement,
-                    "before_data": before_values,
-                    "after_data": after_values
+                    "before_data": before_values, "after_data": after_values
                 })
-
-        # Sort results by date descending
         analysis_results.sort(key=lambda x: x['service_date'], reverse=True)
-        
         return jsonify(analysis_results), 200
-
     except Exception as e:
         app.logger.error(f"Error in service impact analysis: {str(e)}", exc_info=True)
         if sentry_sdk_configured:

@@ -52,6 +52,40 @@
           "diagnosis": "If both axes are affected, it could be a more general issue with the beam spot or target. A full beam tuning by a service engineer is recommended."
         }
       }
+    },
+    "symmetry_horn_fault": {
+      "start_node": "q1",
+      "nodes": {
+        "q1": {
+          "question": "I've detected a symmetry warning. Is the issue present in both Inline and Crossline directions?",
+          "options": ["Yes, in both", "Only Inline", "Only Crossline"],
+          "answers": {
+            "Yes, in both": "q2",
+            "Only Inline": "a_steering",
+            "Only Crossline": "a_bending"
+          }
+        },
+        "q2": {
+          "question": "Okay, the issue is in both directions. Does this occur at multiple gantry angles or just one?",
+          "options": ["Multiple angles", "Just one angle"],
+          "answers": {
+            "Multiple angles": "a_carousel",
+            "Just one angle": "a_gantry_specific"
+          }
+        },
+        "a_steering": {
+          "diagnosis": "An issue isolated to the Inline direction often suggests a problem with the steering coils. A service check of the steering system is recommended."
+        },
+        "a_bending": {
+          "diagnosis": "An issue isolated to the Crossline direction can be related to the bending magnet. A service check of the bending magnet current is recommended."
+        },
+        "a_carousel": {
+          "diagnosis": "If the symmetry issue appears at multiple gantry angles, it could indicate a fault in the target or foil carousel. This requires a service engineer to investigate."
+        },
+        "a_gantry_specific": {
+          "diagnosis": "A symmetry problem at a specific gantry angle might be related to gravity affecting a component. Check for loose components in the gantry head. If nothing is found, schedule a service check."
+        }
+      }
     }
   },
   "maintenance_info": {

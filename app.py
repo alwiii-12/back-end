@@ -398,7 +398,6 @@ def save_data():
         doc_ref = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id)
         doc_ref.set({firestore_field_name: converted}, merge=True)
         
-        # --- Proactive Chat Logic ---
         config = DATA_TYPE_CONFIGS.get(data_type)
         if config:
             warning_found = False
@@ -841,69 +840,6 @@ def log_event():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- ADMIN ENDPOINTS ---
-def calculate_hospital_metrics(center_id, period_days=90):
-    all_numeric_values = {dtype: [] for dtype in DATA_TYPES}
-    warnings = 0
-    oots = 0
-    
-    start_date = datetime.now() - timedelta(days=period_days)
-    
-    months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
-
-    for month_doc in months_ref:
-        month_id_str = month_doc.id.replace("Month_", "")
-        month_dt = datetime.strptime(month_id_str, '%Y-%m')
-
-        if month_dt.year < start_date.year or (month_dt.year == start_date.year and month_dt.month < start_date.month):
-            continue
-
-        month_data = month_doc.to_dict()
-        for data_type, config in DATA_TYPE_CONFIGS.items():
-            field_name = f"data_{data_type}"
-            if field_name in month_data:
-                for row in month_data[field_name]:
-                    for value in row.get("values", []):
-                        try:
-                            val = float(value)
-                            all_numeric_values[data_type].append(val)
-                            abs_val = abs(val)
-                            if abs_val > config["tolerance"]:
-                                oots += 1
-                            elif abs_val > config["warning"]:
-                                warnings += 1
-                        except (ValueError, TypeError):
-                            continue
-    
-    results = { "hospital": center_id, "warnings": warnings, "oots": oots, "metrics": {} }
-    for data_type, values in all_numeric_values.items():
-        if values:
-            results["metrics"][data_type] = {
-                "mean_deviation": np.nanmean(values), "std_deviation": np.nanstd(values), "data_points": len(values)
-            }
-        else:
-            results["metrics"][data_type] = { "mean_deviation": 0, "std_deviation": 0, "data_points": 0 }
-    return results
-
-@app.route('/admin/benchmark-metrics', methods=['GET'])
-def get_benchmark_metrics():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
-    try:
-        period = int(request.args.get('period', 90))
-        users_ref = db.collection('users').stream()
-        unique_hospitals = sorted(list({user.to_dict().get('hospital') for user in users_ref if user.to_dict().get('hospital')}))
-        benchmark_data = [calculate_hospital_metrics(hospital, period_days=period) for hospital in unique_hospitals]
-        benchmark_data.sort(key=lambda x: (x['oots'], x['warnings']), reverse=True)
-        return jsonify(benchmark_data), 200
-    except Exception as e:
-        app.logger.error(f"Error getting benchmark metrics: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'message': str(e)}), 500
-
 @app.route('/admin/users', methods=['GET'])
 def get_all_users():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -941,7 +877,8 @@ def update_user_status():
 
         if not updates: return jsonify({'message': 'No valid fields provided for update'}), 400
 
-        ref, old_user_doc = db.collection("users").document(uid), ref.get()
+        ref = db.collection("users").document(uid)
+        old_user_doc = ref.get()
         old_user_data = old_user_doc.to_dict() if old_user_doc.exists else {}
         ref.update(updates)
 
@@ -1045,7 +982,9 @@ def get_audit_logs():
         user_cache = {}
         for doc in logs_query.limit(200).stream():
             log_data = doc.to_dict()
-            if 'timestamp' in log_data: log_data['timestamp'] = log_data['timestamp'].astimezone(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
+            if 'timestamp' in log_data and isinstance(log_data['timestamp'], datetime):
+                log_data['timestamp'] = log_data['timestamp'].astimezone(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
+            
             user_uid = log_data.get('userUid') or log_data.get('adminUid') or log_data.get('targetUserUid')
             if user_uid:
                 if user_uid in user_cache:

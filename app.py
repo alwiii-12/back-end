@@ -2,6 +2,7 @@
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 import os
+from functools import wraps # NEW IMPORT FOR DECORATOR
 
 # Retrieve Sentry DSN from environment variable
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
@@ -155,6 +156,20 @@ def verify_admin_token(id_token):
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
     return False, None
+
+# --- ADMIN AUTH DECORATOR ---
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            return f(*args, **kwargs)
+        
+        token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        is_admin, _ = verify_admin_token(token)
+        if not is_admin:
+            return jsonify({'message': 'Unauthorized'}), 403
+        return f(*args, **kwargs)
+    return decorated_function
 
 # --- ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
@@ -563,12 +578,9 @@ def get_historical_forecast():
         return jsonify({'error': str(e)}), 500
 
 # --- DASHBOARD & CHATBOT FUNCTIONS ---
-@app.route('/dashboard-summary', methods=['GET'])
+@app.route('/dashboard-summary', methods=['GET', 'OPTIONS'])
+@admin_required
 def get_dashboard_summary():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
-    
     try:
         month_key = request.args.get('month', datetime.now().strftime('%Y-%m'))
         unique_hospitals = {user.to_dict().get('hospital') for user in db.collection('users').stream() if user.to_dict().get('hospital')}
@@ -685,28 +697,21 @@ def log_event():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- ADMIN ENDPOINTS ---
-@app.route('/admin/users', methods=['GET'])
+@app.route('/admin/users', methods=['GET', 'OPTIONS'])
+@admin_required
 def get_all_users():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in db.collection("users").stream()]), 200
     except Exception as e:
         app.logger.error(f"Get all users failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-@app.route('/admin/update-user-status', methods=['POST'])
+@app.route('/admin/update-user-status', methods=['POST', 'OPTIONS'])
+@admin_required
 def update_user_status():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token)
-    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
         uid, new_status, new_role, new_hospital = content.get("uid"), content.get("status"), content.get("role"), content.get("hospital")
-        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token) 
         if not uid: return jsonify({'message': 'UID is required'}), 400
         
         updates = {}
@@ -722,7 +727,9 @@ def update_user_status():
         old_user_data = old_user_doc.to_dict() if old_user_doc.exists else {}
         ref.update(updates)
 
-        audit_entry = {"timestamp": firestore.SERVER_TIMESTAMP, "adminUid": requesting_admin_uid, "action": "user_update", "targetUserUid": uid, "changes": {}, "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")}
+        token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        _, admin_uid = verify_admin_token(token)
+        audit_entry = {"timestamp": firestore.SERVER_TIMESTAMP, "adminUid": admin_uid, "action": "user_update", "targetUserUid": uid, "changes": {}, "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")}
         if "status" in updates: audit_entry["changes"]["status"] = {"old": old_user_data.get("status"), "new": updates["status"]}
         if "role" in updates: audit_entry["changes"]["role"] = {"old": old_user_data.get("role"), "new": updates["role"]}
         if "hospital" in updates: audit_entry["changes"]["hospital"] = {"old": old_user_data.get("hospital"), "new": updates["hospital"]}
@@ -739,18 +746,14 @@ def update_user_status():
         return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
     except Exception as e:
         app.logger.error(f"Error updating user: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-@app.route('/admin/delete-user', methods=['DELETE'])
+@app.route('/admin/delete-user', methods=['DELETE', 'OPTIONS'])
+@admin_required
 def delete_user():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token)
-    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
-        uid_to_delete, requesting_admin_uid = content.get("uid"), content.get("admin_uid", admin_uid_from_token)
+        uid_to_delete = content.get("uid")
         if not uid_to_delete: return jsonify({'message': 'Missing UID for deletion'}), 400
 
         user_doc_ref = db.collection("users").document(uid_to_delete)
@@ -762,19 +765,17 @@ def delete_user():
                 return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
         user_doc_ref.delete()
         
-        db.collection("audit_logs").add({"timestamp": firestore.SERVER_TIMESTAMP, "adminUid": requesting_admin_uid, "action": "user_deletion", "targetUserUid": uid_to_delete, "deletedUserData": user_data_to_log})
+        token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        _, admin_uid = verify_admin_token(token)
+        db.collection("audit_logs").add({"timestamp": firestore.SERVER_TIMESTAMP, "adminUid": admin_uid, "action": "user_deletion", "targetUserUid": uid_to_delete, "deletedUserData": user_data_to_log})
         return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
     except Exception as e:
         app.logger.error(f"Error deleting user: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
-@app.route('/admin/hospital-data', methods=['GET'])
+@app.route('/admin/hospital-data', methods=['GET', 'OPTIONS'])
+@admin_required
 def get_hospital_data():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         hospital_id, month_param = request.args.get('hospitalId'), request.args.get('month')
         if not hospital_id or not month_param: return jsonify({'error': 'Missing hospitalId or month parameter'}), 400
@@ -792,15 +793,11 @@ def get_hospital_data():
         return jsonify({'data': all_data}), 200
     except Exception as e:
         app.logger.error(f"Admin get hospital data failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-@app.route('/admin/audit-logs', methods=['GET'])
+@app.route('/admin/audit-logs', methods=['GET', 'OPTIONS'])
+@admin_required
 def get_audit_logs():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         logs_query = db.collection("audit_logs").order_by("timestamp", direction=firestore.Query.DESCENDING)
         hospital_id, action, date_str = request.args.get('hospitalId'), request.args.get('action'), request.args.get('date')
@@ -824,10 +821,22 @@ def get_audit_logs():
         return jsonify({"logs": logs}), 200
     except Exception as e:
         app.logger.error(f"Error loading audit logs: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
+@app.route('/admin/benchmark-metrics', methods=['GET', 'OPTIONS'])
+@admin_required
+def get_benchmark_metrics():
+    try:
+        period = int(request.args.get('period', 90))
+        users_ref = db.collection('users').stream()
+        unique_hospitals = sorted(list({user.to_dict().get('hospital') for user in users_ref if user.to_dict().get('hospital')}))
+        benchmark_data = [calculate_hospital_metrics(hospital, period_days=period) for hospital in unique_hospitals]
+        benchmark_data.sort(key=lambda x: (x['oots'], x['warnings']), reverse=True)
+        return jsonify(benchmark_data), 200
+    except Exception as e:
+        app.logger.error(f"Error getting benchmark metrics: {str(e)}", exc_info=True)
+        return jsonify({'message': str(e)}), 500
+        
 def fetch_data_for_period(hospital_id, start_date, end_date):
     data_points, months_to_check = {}, set()
     current_date = start_date
@@ -850,16 +859,13 @@ def fetch_data_for_period(hospital_id, start_date, end_date):
                 except (ValueError, TypeError): continue
     return data_points
 
-@app.route('/admin/service-impact-analysis', methods=['GET'])
+@app.route('/admin/service-impact-analysis', methods=['GET', 'OPTIONS'])
+@admin_required
 def get_service_impact_analysis():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
-
-    hospital_id = request.args.get('hospitalId')
-    if not hospital_id: return jsonify({'message': 'hospitalId is required'}), 400
-
     try:
+        hospital_id = request.args.get('hospitalId')
+        if not hospital_id: return jsonify({'message': 'hospitalId is required'}), 400
+
         users_query = db.collection('users').where('hospital', '==', hospital_id).limit(1).stream()
         user_uid = next((user.id for user in users_query), None)
         if not user_uid: return jsonify([])
@@ -888,8 +894,6 @@ def get_service_impact_analysis():
         return jsonify(analysis_results), 200
     except Exception as e:
         app.logger.error(f"Error in service impact analysis: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
 # --- INDEX AND RUN ---

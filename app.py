@@ -77,14 +77,8 @@ SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
-# --- [HELPER FUNCTION FOR REAL IP] ---
-def get_real_ip():
-    """Gets the real IP address from the request headers."""
-    if 'X-Forwarded-For' in request.headers:
-        # The X-Forwarded-For header can contain a comma-separated list of IPs.
-        # The client's IP is typically the first one.
-        return request.headers['X-Forwarded-For'].split(',')[0].strip()
-    return request.remote_addr
+# --- [FIX] HELPER FUNCTION FOR REAL IP REMOVED ---
+# The get_real_ip function has been removed to stop IP address logging.
 
 # --- [EMAIL SENDER FUNCTION] ---
 def send_notification_email(recipient_email, subject, body):
@@ -294,7 +288,7 @@ def login():
         if user_status != "active":
             return jsonify({'status': 'error', 'message': 'This account is not active.'}), 403
 
-        # --- [START OF FIX] Add this block to create the audit log ---
+        # --- [FIX] Modified audit log to remove IP address ---
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
             "action": "user_login",
@@ -302,12 +296,10 @@ def login():
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
                 "user_email": user_data.get("email", "N/A"),
-                "ip_address": get_real_ip(), # Using the helper function
                 "user_agent": request.headers.get('User-Agent')
             }
         }
         db.collection("audit_logs").add(audit_entry)
-        # --- [END OF FIX] ---
 
         return jsonify({
             'status': 'success',
@@ -368,6 +360,7 @@ def update_profile():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- DATA & ALERT ENDPOINTS ---
+# ... (These endpoints remain unchanged)
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -517,6 +510,7 @@ def send_alert():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- PREDICTION & FORECASTING ENDPOINTS ---
+# ... (These endpoints remain unchanged)
 @app.route('/predictions', methods=['GET'])
 def get_predictions():
     try:
@@ -704,8 +698,6 @@ def get_historical_forecast():
         
         forecast_df = model.predict(future)
         
-        # --- [THIS IS THE FIX from our conversation] ---
-        # Convert the 'ds' column to the 'YYYY-MM-DD' string format
         forecast_df['ds'] = forecast_df['ds'].dt.strftime('%Y-%m-%d')
         
         actuals = []
@@ -728,7 +720,7 @@ def get_historical_forecast():
         app.logger.error(f"Historical forecast failed: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-# --- [START] Re-added missing functions ---
+# --- [UNCHANGED FUNCTIONS] ---
 def get_monthly_summary(center_id, month_key):
     warnings = 0
     oot = 0
@@ -892,9 +884,8 @@ def diagnose_step():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
-# --- [END] Re-added missing functions ---
 
-# --- [START OF FIX] New endpoint for logging frontend events like logout ---
+# --- [FIX] Modified log_event to remove IP address ---
 @app.route('/log_event', methods=['POST'])
 def log_event():
     try:
@@ -914,8 +905,7 @@ def log_event():
             "targetUserUid": user_uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
-                "user_email": user_data.get("email", "N/A"), # Added the email
-                "ip_address": get_real_ip(), # Using the helper function
+                "user_email": user_data.get("email", "N/A"),
                 "user_agent": request.headers.get('User-Agent')
             }
         }
@@ -927,9 +917,9 @@ def log_event():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
-# --- [END OF FIX] ---
 
 # --- BENCHMARKING ENDPOINT ---
+# ... (This endpoint remains unchanged)
 def calculate_hospital_metrics(center_id, period_days=90):
     """
     Helper function to calculate performance metrics for a single hospital
@@ -1198,6 +1188,7 @@ def get_hospital_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
+# --- [FIX] Modified admin/audit-logs endpoint ---
 @app.route('/admin/audit-logs', methods=['GET'])
 def get_audit_logs():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1238,15 +1229,14 @@ def get_audit_logs():
                 else:
                     user_doc = db.collection('users').document(user_uid).get()
                     if user_doc.exists:
-                        # --- [THIS IS THE FIX] ---
-                        # Get both name and email for a more informative display
                         user_data = user_doc.to_dict()
                         user_name = user_data.get('name', user_uid)
                         user_email = user_data.get('email', '')
-                        display_string = f"{user_name} ({user_email})" if user_email else user_name
+                        user_hospital = user_data.get('hospital', 'N/A')
+                        # New display string format with the institution
+                        display_string = f"{user_name} ({user_email})\n{user_hospital}"
                         log_data['user_display'] = display_string
                         user_cache[user_uid] = display_string
-                        # --- [END OF FIX] ---
                     else:
                         log_data['user_display'] = user_uid
                         user_cache[user_uid] = user_uid
@@ -1268,4 +1258,3 @@ def index():
 
 if __name__ == '__main__':
     app.run(debug=True)
-

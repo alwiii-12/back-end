@@ -1786,6 +1786,81 @@ def get_service_impact_analysis():
 
 
 
+# --- [NEW] BENCHMARKING ENDPOINT ---
+@app.route('/admin/benchmark-metrics', methods=['GET'])
+def get_benchmark_metrics():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        period = int(request.args.get('period', 90))
+        end_date = datetime.utcnow()
+        start_date = end_date - timedelta(days=period)
+        
+        hospitals = [user.to_dict().get('hospital') for user in db.collection('users').stream()]
+        unique_hospitals = sorted(list(set(filter(None, hospitals))))
+        
+        results = []
+        for hospital in unique_hospitals:
+            all_values = []
+            warnings, oots = 0, 0
+            
+            # This is a simplified fetch, a more optimized version would query months in range
+            months_snapshot = db.collection("linac_data").document(hospital).collection("months").stream()
+            
+            for month_doc in months_snapshot:
+                month_id_str = month_doc.id.replace("Month_", "")
+                month_start_date = datetime.strptime(month_id_str + "-01", "%Y-%m-%d")
+                
+                if month_start_date.year < start_date.year and month_start_date.month < start_date.month:
+                    continue
+
+                month_data = month_doc.to_dict()
+                for data_type, config in DATA_TYPE_CONFIGS.items():
+                    for row in month_data.get(f"data_{data_type}", []):
+                        for i, value_str in enumerate(row.get("values", [])):
+                            try:
+                                value = float(value_str)
+                                day = i + 1
+                                current_date = datetime.strptime(f"{month_id_str}-{day}", "%Y-%m-%d")
+
+                                if start_date <= current_date <= end_date:
+                                    if data_type == 'output':
+                                        all_values.append(value)
+                                    
+                                    val_abs = abs(value)
+                                    if val_abs > config["tolerance"]:
+                                        oots += 1
+                                    elif val_abs > config["warning"]:
+                                        warnings += 1
+                            except (ValueError, TypeError):
+                                continue
+
+            if all_values:
+                metrics = {
+                    "mean_deviation": np.mean(all_values),
+                    "std_deviation": np.std(all_values),
+                    "data_points": len(all_values)
+                }
+            else:
+                metrics = {"mean_deviation": 0, "std_deviation": 0, "data_points": 0}
+
+            results.append({
+                "hospital": hospital,
+                "oots": oots,
+                "warnings": warnings,
+                "metrics": {"output": metrics}
+            })
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        app.logger.error(f"Error in benchmark metrics: {str(e)}", exc_info=True)
+        return jsonify({'message': str(e)}), 500
+
+
 # --- INDEX AND RUN ---
 
 @app.route('/')

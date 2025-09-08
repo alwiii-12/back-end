@@ -2,6 +2,7 @@
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 import os
+from functools import wraps # New import for decorators
 
 # Retrieve Sentry DSN from environment variable
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
@@ -15,7 +16,7 @@ if SENTRY_DSN:
         ],
         traces_sample_rate=1.0, # Capture 100% of transactions for performance monitoring
         profiles_sample_rate=1.0, # Capture 100% of active samples for profiling
-        send_default_pii=True # Enable sending of PII (Personally Identifiable Information)
+        send_default_pii=False # MODIFIED: Changed to False for better privacy.
     )
     sentry_sdk_configured = True
     print("Sentry initialized successfully.")
@@ -24,7 +25,7 @@ else:
 
 
 # --- [UNCHANGED IMPORTS] ---
-from flask import Flask, request, jsonify, send_file, abort
+from flask import Flask, request, jsonify, send_file, abort, g
 from flask_cors import CORS
 import smtplib
 from email.mime.text import MIMEText
@@ -113,12 +114,54 @@ else:
 
 db = firestore.client()
 
+# --- [NEW] SECURE AUTHENTICATION DECORATORS ---
+def token_required(f):
+    """Decorator to verify Firebase ID Token for standard users."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        if not id_token:
+            return jsonify({'status': 'error', 'message': 'Authorization token is missing'}), 401
+        try:
+            decoded_token = auth.verify_id_token(id_token)
+            g.uid = decoded_token['uid'] # Store uid in Flask's global context `g`
+        except auth.InvalidIdTokenError:
+            return jsonify({'status': 'error', 'message': 'Invalid authentication token'}), 401
+        except Exception as e:
+            app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
+            return jsonify({'status': 'error', 'message': 'Token verification failed'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    """Decorator to verify Firebase ID Token and check for Admin role."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        id_token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        if not id_token:
+            return jsonify({'status': 'error', 'message': 'Authorization token is missing'}), 401
+        try:
+            decoded_token = auth.verify_id_token(id_token)
+            uid = decoded_token['uid']
+            user_doc = db.collection('users').document(uid).get()
+            if not user_doc.exists or user_doc.to_dict().get('role') != 'Admin':
+                return jsonify({'status': 'error', 'message': 'Admin privileges required'}), 403
+            g.uid = uid # Store admin uid in Flask's global context `g`
+        except auth.InvalidIdTokenError:
+            return jsonify({'status': 'error', 'message': 'Invalid authentication token'}), 401
+        except Exception as e:
+            app.logger.error(f"Admin token verification failed: {str(e)}", exc_info=True)
+            return jsonify({'status': 'error', 'message': 'Admin verification failed'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
 # --- APP CHECK VERIFICATION ---
 @app.before_request
 def verify_app_check_token():
-    app_check_token = request.headers.get('X-Firebase-AppCheck')
+    # Allow OPTIONS requests and root path to pass through without app check
     if request.method == 'OPTIONS' or request.path == '/':
         return None
+    app_check_token = request.headers.get('X-Firebase-AppCheck')
     if not app_check_token:
         app.logger.warning("App Check token missing.")
         return jsonify({'error': 'Unauthorized: App Check token is missing'}), 401
@@ -142,31 +185,18 @@ DATA_TYPE_CONFIGS = {
     "crossline": {"warning": 0.9, "tolerance": 1.0}
 }
 
-# --- VERIFY ADMIN TOKEN ---
-def verify_admin_token(id_token):
-    try:
-        decoded_token = auth.verify_id_token(id_token)
-        uid = decoded_token['uid']
-        user_doc = db.collection('users').document(uid).get()
-        if user_doc.exists and user_doc.to_dict().get('role') == 'Admin':
-            return True, uid
-    except Exception as e:
-        app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-    return False, None
-
 # --- ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
+@token_required
 def save_annotation():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        uid = g.uid # Get uid securely from the verified token
         month = content.get("month")
         key = content.get("key")
         data = content.get("data")
 
-        if not all([uid, month, key, data]):
+        if not all([month, key, data]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
         annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
@@ -196,14 +226,15 @@ def save_annotation():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/delete-annotation', methods=['POST'])
+@token_required
 def delete_annotation():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        uid = g.uid # Get uid securely from the verified token
         month = content.get("month")
         key = content.get("key")
 
-        if not all([uid, month, key]):
+        if not all([month, key]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
         
         annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
@@ -225,15 +256,20 @@ def delete_annotation():
 # --- USER MANAGEMENT ENDPOINTS ---
 @app.route('/signup', methods=['POST'])
 def signup():
+    # Signup is a public endpoint, so no token is required.
+    # The uid is generated on the client by Firebase Auth and sent here to create a user profile.
     try:
         user = request.get_json(force=True)
         required = ['name', 'email', 'hospital', 'role', 'uid', 'status']
-        missing = [f for f in required if f not in user or user[f].strip() == ""]
+        missing = [f for f in required if f not in user or user.get(f, "").strip() == ""]
         if missing:
             return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
-        user_ref = db.collection('users').document(user['uid'])
+        
+        uid = user['uid']
+        user_ref = db.collection('users').document(uid)
         if user_ref.get().exists:
             return jsonify({'status': 'error', 'message': 'User already exists'}), 409
+        
         user_ref.set({
             'name': user['name'],
             'email': user['email'].strip().lower(),
@@ -250,13 +286,10 @@ def signup():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/login', methods=['POST'])
+@token_required
 def login():
     try:
-        content = request.get_json(force=True)
-        uid = content.get("uid", "").strip()
-        if not uid:
-            return jsonify({'status': 'error', 'message': 'Missing UID'}), 400
-            
+        uid = g.uid # Get uid securely from the verified token
         user_ref = db.collection("users").document(uid)
         user_doc = user_ref.get()
 
@@ -303,14 +336,15 @@ def login():
         return jsonify({'status': 'error', 'message': 'An internal server error occurred during login.'}), 500
 
 @app.route('/update-profile', methods=['POST'])
+@token_required
 def update_profile():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        uid = g.uid # Get uid securely from the verified token
         new_name = content.get("name")
         new_hospital = content.get("hospital")
 
-        if not all([uid, new_name, new_hospital]):
+        if not all([new_name, new_hospital]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
         user_ref = db.collection('users').document(uid)
@@ -373,10 +407,11 @@ def find_new_warnings(old_data, new_data, config):
 
 # --- DATA & ALERT ENDPOINTS ---
 @app.route('/save', methods=['POST'])
+@token_required
 def save_data():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        uid = g.uid # Get uid securely from the verified token
         month_param = content.get("month")
         raw_data = content.get("data")
         data_type = content.get("dataType")
@@ -432,14 +467,15 @@ def save_data():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/data', methods=['GET'])
+@token_required
 def get_data():
     try:
         month_param = request.args.get('month')
-        uid = request.args.get('uid')
+        uid = g.uid # Get uid securely from the verified token
         data_type = request.args.get('dataType')
 
-        if not month_param or not uid:
-            return jsonify({'error': 'Missing "month" or "uid"'}), 400
+        if not month_param:
+            return jsonify({'error': 'Missing "month"'}), 400
         if not data_type or data_type not in DATA_TYPES:
             return jsonify({'error': 'Invalid or missing dataType'}), 400
 
@@ -479,14 +515,15 @@ def get_data():
 
 # --- [NEW] EXPORT TO EXCEL ENDPOINT ---
 @app.route('/export-excel', methods=['POST'])
+@token_required
 def export_excel():
     try:
         content = request.get_json(force=True)
         month_param = content.get('month')
-        uid = content.get('uid')
+        uid = g.uid # Get uid securely from the verified token
         data_type = content.get('dataType')
 
-        if not all([month_param, uid, data_type]):
+        if not all([month_param, data_type]):
             return jsonify({'error': 'Missing required parameters'}), 400
 
         user_doc = db.collection("users").document(uid).get()
@@ -501,7 +538,6 @@ def export_excel():
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
         
-        # Fetch data from Firestore
         doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
         doc = doc_ref.get()
 
@@ -514,7 +550,6 @@ def export_excel():
         if not doc_data:
             return jsonify({'error': f'No {data_type} data found for the selected month'}), 404
 
-        # Prepare data for DataFrame
         data_for_df = []
         for row in doc_data:
             energy = row.get("energy")
@@ -522,18 +557,14 @@ def export_excel():
             padded_values = (values + [""] * num_days)[:num_days]
             data_for_df.append([energy] + padded_values)
 
-        # Create column headers (Energy, 1, 2, 3, ...)
         columns = ["Energy"] + list(range(1, num_days + 1))
-        
         df = pd.DataFrame(data_for_df, columns=columns)
 
-        # Create an in-memory Excel file
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name=f'{data_type.title()} Data')
         output.seek(0)
         
-        # Send the file to the user
         return send_file(
             output,
             download_name=f'LINAC_QA_{data_type.upper()}_{month_param}.xlsx',
@@ -547,10 +578,11 @@ def export_excel():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/send-alert', methods=['POST'])
+@token_required
 def send_alert():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        uid = g.uid # Get uid securely from the verified token
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
@@ -609,15 +641,16 @@ def send_alert():
 
 # --- PREDICTION & FORECASTING ENDPOINTS ---
 @app.route('/predictions', methods=['GET'])
+@token_required
 def get_predictions():
     try:
-        uid = request.args.get('uid')
+        uid = g.uid # Get uid securely from the verified token
         data_type = request.args.get('dataType')
         energy = request.args.get('energy')
         month = request.args.get('month')
 
-        if not all([uid, data_type, energy, month]):
-            return jsonify({'error': 'Missing required parameters (uid, dataType, energy, month)'}), 400
+        if not all([data_type, energy, month]):
+            return jsonify({'error': 'Missing required parameters (dataType, energy, month)'}), 400
 
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
@@ -641,114 +674,22 @@ def get_predictions():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-@app.route('/update-live-forecast', methods=['POST'])
-def update_live_forecast():
-    try:
-        content = request.get_json(force=True)
-        uid = content.get('uid')
-        month_param = content.get('month')
-        data_type = content.get('dataType')
-        energy = content.get('energy')
-
-        if not all([uid, month_param, data_type, energy]):
-            return jsonify({'error': 'Missing required parameters'}), 400
-
-        user_doc = db.collection("users").document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-
-        # 1. Fetch all historical data
-        months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
-        all_values = []
-        for month_doc in months_ref:
-            month_id_str = month_doc.id.replace("Month_", "")
-            month_data = month_doc.to_dict()
-            field_name = f"data_{data_type}"
-            if field_name in month_data:
-                year, mon = map(int, month_id_str.split("-"))
-                for row_data in month_data[field_name]:
-                    if row_data.get("energy") == energy:
-                        for i, value in enumerate(row_data.get("values", [])):
-                            day = i + 1
-                            try:
-                                if value and day <= monthrange(year, mon)[1]:
-                                    date = pd.to_datetime(f"{year}-{mon}-{day}")
-                                    if date <= pd.Timestamp.now():
-                                        all_values.append({"ds": date, "y": float(value)})
-                            except (ValueError, TypeError):
-                                continue
-        
-        df_for_training = pd.DataFrame(all_values).sort_values(by="ds").drop_duplicates(subset='ds', keep='last')
-        
-        if len(df_for_training) < 5:
-            return jsonify({'error': 'Not enough historical data.'}), 404
-
-        # 2. Fetch service events
-        service_events_df = None
-        events = []
-        events_ref = db.collection('service_events').document(uid).collection('events').stream()
-        for event in events_ref:
-            events.append(event.id)
-        if events:
-            service_events_df = pd.DataFrame({
-                'holiday': 'service_day',
-                'ds': pd.to_datetime(events),
-                'lower_window': 0,
-                'upper_window': 1,
-            })
-
-        # 3. Train model and create forecast
-        model = Prophet(holidays=service_events_df)
-        model.fit(df_for_training)
-        
-        last_known_date = df_for_training['ds'].max()
-        future = model.make_future_dataframe(periods=31)
-        forecast_df = model.predict(future)
-        
-        final_forecast = forecast_df[forecast_df['ds'] >= last_known_date]
-
-        # 4. Save the new forecast to Firestore, overwriting the old one
-        prediction_doc_id = f"{center_id}_{data_type}_{energy}_{month_param}"
-        doc_ref = db.collection("linac_predictions").document(prediction_doc_id)
-        
-        forecast_data = []
-        for _, row in final_forecast.iterrows():
-            if row['ds'].strftime('%Y-%m') == month_param:
-                forecast_data.append({
-                    "date": row['ds'].strftime('%Y-%m-%d'),
-                    "predicted_value": row['yhat'],
-                    "lower_bound": row['yhat_lower'],
-                    "upper_bound": row['yhat_upper']
-                })
-        
-        doc_ref.set({
-            "centerId": center_id,
-            "dataType": data_type,
-            "energy": energy,
-            "forecastMonth": month_param,
-            "forecast": forecast_data,
-            "lastUpdated": firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({'status': 'success', 'message': 'Live forecast updated successfully'}), 200
-
-    except Exception as e:
-        app.logger.error(f"Live forecast update failed: {str(e)}", exc_info=True)
-        if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e)
-        return jsonify({'error': str(e)}), 500
+# --- [REMOVED] /update-live-forecast endpoint was removed ---
+# This functionality is computationally expensive and is better handled by the
+# scheduled `predictive_service.py` cron job, which runs daily.
+# This prevents server timeouts and ensures a more reliable user experience.
 
 @app.route('/historical-forecast', methods=['POST'])
+@token_required
 def get_historical_forecast():
     try:
         content = request.get_json(force=True)
-        uid = content.get('uid')
+        uid = g.uid # Get uid securely from the verified token
         month_param = content.get('month')
         data_type = content.get('dataType')
         energy = content.get('energy')
 
-        if not all([uid, month_param, data_type, energy]):
+        if not all([month_param, data_type, energy]):
             return jsonify({'error': 'Missing required parameters'}), 400
 
         user_doc = db.collection("users").document(uid).get()
@@ -843,12 +784,8 @@ def get_monthly_summary(center_id, month_key):
     return warnings, oot
 
 @app.route('/dashboard-summary', methods=['GET'])
+@admin_required
 def get_dashboard_summary():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-    
     try:
         month_key = request.args.get('month')
         if not month_key:
@@ -888,6 +825,7 @@ def get_dashboard_summary():
         return jsonify({'message': str(e)}), 500
 
 @app.route('/query-qa-data', methods=['POST'])
+@token_required
 def query_qa_data():
     try:
         content = request.get_json(force=True)
@@ -931,6 +869,7 @@ def query_qa_data():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/diagnose-step', methods=['POST'])
+@token_required
 def diagnose_step():
     try:
         content = request.get_json(force=True)
@@ -984,21 +923,22 @@ def diagnose_step():
 
 # --- EVENT LOGGING ENDPOINT ---
 @app.route('/log_event', methods=['POST'])
+@token_required
 def log_event():
     try:
         content = request.get_json(force=True)
         action = content.get("action")
-        user_uid = content.get("userUid")
+        user_uid = g.uid # Get uid securely from the verified token
 
-        if not action or not user_uid:
-            return jsonify({'status': 'error', 'message': 'Missing action or userUid'}), 400
+        if not action:
+            return jsonify({'status': 'error', 'message': 'Missing action'}), 400
 
         user_doc = db.collection('users').document(user_uid).get()
         user_data = user_doc.to_dict() if user_doc.exists else {}
         
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
-            "action": action, # e.g., 'user_logout'
+            "action": action,
             "targetUserUid": user_uid,
             "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
             "details": {
@@ -1027,7 +967,10 @@ def calculate_hospital_metrics(center_id, period_days=90):
 
     for month_doc in months_ref:
         month_id_str = month_doc.id.replace("Month_", "")
-        month_dt = datetime.strptime(month_id_str, '%Y-%m')
+        try:
+            month_dt = datetime.strptime(month_id_str, '%Y-%m')
+        except ValueError:
+            continue
 
         if month_dt.year < start_date.year or (month_dt.year == start_date.year and month_dt.month < start_date.month):
             continue
@@ -1068,12 +1011,8 @@ def calculate_hospital_metrics(center_id, period_days=90):
     return results
 
 @app.route('/admin/benchmark-metrics', methods=['GET'])
+@admin_required
 def get_benchmark_metrics():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
     try:
         period = int(request.args.get('period', 90))
         
@@ -1096,11 +1035,8 @@ def get_benchmark_metrics():
         return jsonify({'message': str(e)}), 500
 
 @app.route('/admin/users', methods=['GET'])
+@admin_required
 def get_all_users():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
     try:
         users = db.collection("users").stream()
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
@@ -1111,16 +1047,12 @@ def get_all_users():
         return jsonify({'message': str(e)}), 500
 
 @app.route('/admin/update-user-status', methods=['POST'])
+@admin_required
 def update_user_status():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-        
-        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token) 
+        requesting_admin_uid = g.uid # Get admin uid securely from token
 
         new_status = content.get("status")
         new_role = content.get("role")
@@ -1154,8 +1086,6 @@ def update_user_status():
             "action": "user_update",
             "targetUserUid": uid,
             "changes": {},
-            "oldData": {},
-            "newData": {},
             "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")
         }
 
@@ -1189,16 +1119,12 @@ def update_user_status():
         return jsonify({'message': str(e)}), 500
 
 @app.route('/admin/delete-user', methods=['DELETE'])
+@admin_required
 def delete_user():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
     try:
         content = request.get_json(force=True)
         uid_to_delete = content.get("uid")
-        requesting_admin_uid = content.get("admin_uid", admin_uid_from_token)
+        requesting_admin_uid = g.uid # Get admin uid securely from token
 
         if not uid_to_delete:
             return jsonify({'message': 'Missing UID for deletion'}), 400
@@ -1209,10 +1135,11 @@ def delete_user():
         try:
             auth.delete_user(uid_to_delete)
         except Exception as e:
-            if "User record not found" not in str(e):
+            # It's okay if auth user is already gone, proceed to delete from Firestore.
+            if "User not found" not in str(e) and "USER_NOT_FOUND" not in str(e):
                 app.logger.error(f"Error deleting Firebase Auth user {uid_to_delete}: {str(e)}", exc_info=True)
-                return jsonify({'message': f"Failed to delete Firebase Auth user: {str(e)}"}), 500
-
+                # Don't block Firestore deletion if Auth deletion fails for other reasons
+        
         user_doc_ref.delete()
         
         audit_entry = {
@@ -1234,12 +1161,8 @@ def delete_user():
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
 
 @app.route('/admin/hospital-data', methods=['GET'])
+@admin_required
 def get_hospital_data():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
     try:
         hospital_id = request.args.get('hospitalId')
         month_param = request.args.get('month')
@@ -1276,15 +1199,12 @@ def get_hospital_data():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/admin/audit-logs', methods=['GET'])
+@admin_required
 def get_audit_logs():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
     try:
         logs_query = db.collection("audit_logs").order_by("timestamp", direction=firestore.Query.DESCENDING)
 
+        # Filtering parameters
         hospital_id = request.args.get('hospitalId')
         action = request.args.get('action')
         date_str = request.args.get('date')
@@ -1298,11 +1218,11 @@ def get_audit_logs():
             end_dt = start_dt + timedelta(days=1)
             logs_query = logs_query.where('timestamp', '>=', start_dt).where('timestamp', '<', end_dt)
         
-        logs_query = logs_query.limit(200)
+        logs_query = logs_query.limit(200) # Limit the number of logs returned
         logs_snapshot = logs_query.stream()
 
         logs = []
-        user_cache = {}
+        user_cache = {} # Cache to avoid refetching the same user doc
         for doc in logs_snapshot:
             log_data = doc.to_dict()
             if 'timestamp' in log_data and isinstance(log_data['timestamp'], datetime):
@@ -1323,8 +1243,8 @@ def get_audit_logs():
                         log_data['user_display'] = display_string
                         user_cache[user_uid] = display_string
                     else:
-                        log_data['user_display'] = user_uid
-                        user_cache[user_uid] = user_uid
+                        log_data['user_display'] = f"Deleted User ({user_uid})"
+                        user_cache[user_uid] = f"Deleted User ({user_uid})"
             
             logs.append(log_data)
         
@@ -1339,17 +1259,10 @@ def get_audit_logs():
 # --- [NEW] HELPER FUNCTION FOR SERVICE ANALYSIS ---
 def fetch_data_for_period(hospital_id, start_date, end_date):
     """
-    Fetches all 'output' data for a hospital within a specific date range,
-    spanning across monthly documents if necessary.
+    Fetches all 'output' data for a hospital within a specific date range.
     """
     data_points = {}
-    
-    # Determine the months to query
-    months_to_check = set()
-    current_date = start_date
-    while current_date <= end_date:
-        months_to_check.add(current_date.strftime("Month_%Y-%m"))
-        current_date += timedelta(days=1)
+    months_to_check = set((start_date + timedelta(days=x)).strftime("Month_%Y-%m") for x in range((end_date-start_date).days + 1))
     
     for month_doc_id in months_to_check:
         month_doc = db.collection("linac_data").document(hospital_id).collection("months").document(month_doc_id).get()
@@ -1368,9 +1281,8 @@ def fetch_data_for_period(hospital_id, start_date, end_date):
                 day = i + 1
                 try:
                     current_point_date = datetime.strptime(f"{month_str}-{day}", "%Y-%m-%d")
-                    if start_date <= current_point_date <= end_date:
-                        if value not in [None, '']:
-                            data_points[energy].append(float(value))
+                    if start_date <= current_point_date <= end_date and value not in [None, '']:
+                        data_points[energy].append(float(value))
                 except (ValueError, TypeError):
                     continue
                     
@@ -1379,42 +1291,33 @@ def fetch_data_for_period(hospital_id, start_date, end_date):
 
 # --- [NEW] SERVICE IMPACT ANALYSIS ENDPOINT ---
 @app.route('/admin/service-impact-analysis', methods=['GET'])
+@admin_required
 def get_service_impact_analysis():
-    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
-    if not is_admin:
-        return jsonify({'message': 'Unauthorized'}), 403
-
     hospital_id = request.args.get('hospitalId')
     if not hospital_id:
         return jsonify({'message': 'hospitalId is required'}), 400
 
     try:
-        # Find a user for the given hospital to locate service events
         users_query = db.collection('users').where('hospital', '==', hospital_id).limit(1).stream()
         user_uid = next((user.id for user in users_query), None)
         
         if not user_uid:
-            return jsonify([]) # Return empty list if no user/events found
+            return jsonify([])
 
         service_events_ref = db.collection('service_events').document(user_uid).collection('events')
         service_events = service_events_ref.stream()
         
         analysis_results = []
-
         for event in service_events:
             service_date = datetime.strptime(event.id, "%Y-%m-%d")
             
-            # Define before and after periods
             before_start = service_date - timedelta(days=14)
             before_end = service_date - timedelta(days=1)
             after_start = service_date + timedelta(days=1)
             after_end = service_date + timedelta(days=14)
             
-            # Fetch data for both periods
             before_data_by_energy = fetch_data_for_period(hospital_id, before_start, before_end)
             after_data_by_energy = fetch_data_for_period(hospital_id, after_start, after_end)
-
             processed_energies = set(before_data_by_energy.keys()) | set(after_data_by_energy.keys())
 
             for energy in processed_energies:
@@ -1424,35 +1327,21 @@ def get_service_impact_analysis():
                 if not before_values or not after_values:
                     continue
 
-                # Calculate metrics
-                before_metrics = {
-                    "mean_deviation": np.mean(before_values),
-                    "std_deviation": np.std(before_values)
-                }
-                after_metrics = {
-                    "mean_deviation": np.mean(after_values),
-                    "std_deviation": np.std(after_values)
-                }
+                before_metrics = {"mean_deviation": np.mean(before_values), "std_deviation": np.std(before_values)}
+                after_metrics = {"mean_deviation": np.mean(after_values), "std_deviation": np.std(after_values)}
                 
-                # Calculate improvement
                 improvement = 0
                 if before_metrics["std_deviation"] > 0:
                     improvement = ((before_metrics["std_deviation"] - after_metrics["std_deviation"]) / before_metrics["std_deviation"]) * 100
 
                 analysis_results.append({
-                    "hospital": hospital_id,
-                    "service_date": event.id,
-                    "energy": energy,
-                    "before_metrics": before_metrics,
-                    "after_metrics": after_metrics,
+                    "hospital": hospital_id, "service_date": event.id, "energy": energy,
+                    "before_metrics": before_metrics, "after_metrics": after_metrics,
                     "stability_improvement_percent": improvement,
-                    "before_data": before_values,
-                    "after_data": after_values
+                    "before_data": before_values, "after_data": after_values
                 })
 
-        # Sort results by date descending
         analysis_results.sort(key=lambda x: x['service_date'], reverse=True)
-        
         return jsonify(analysis_results), 200
 
     except Exception as e:

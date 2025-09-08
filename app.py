@@ -345,7 +345,33 @@ def update_profile():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- DATA & ALERT ENDPOINTS ---
+# --- [MODIFIED] HELPER FUNCTION FOR PROACTIVE CHAT ---
+def find_new_warnings(old_data, new_data, config):
+    old_warnings = set()
+    for row in old_data:
+        energy = row.get("energy")
+        for i, value in enumerate(row.get("values", [])):
+            try:
+                val = abs(float(value))
+                if val >= config["warning"] and val <= config["tolerance"]:
+                    old_warnings.add(f"{energy}-{i}")
+            except (ValueError, TypeError):
+                continue
+    
+    new_warnings = []
+    for row in new_data:
+        energy = row[0]
+        for i, value in enumerate(row[1:]):
+            try:
+                val = abs(float(value))
+                if val >= config["warning"] and val <= config["tolerance"]:
+                    if f"{energy}-{i}" not in old_warnings:
+                        new_warnings.append({"energy": energy, "value": val})
+            except (ValueError, TypeError):
+                continue
+    return new_warnings
+
+# --- [MODIFIED] DATA SAVE ENDPOINT ---
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -363,20 +389,34 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
         user_data = user_doc.to_dict()
         center_id = user_data.get("centerId")
-        user_status = user_data.get("status", "pending")
 
-        if user_status != "active":
-            return jsonify({'status': 'error', 'message': 'Account not active'}), 403
         if not center_id:
             return jsonify({'status': 'error', 'message': 'Missing centerId'}), 400
-        if not isinstance(raw_data, list):
-            return jsonify({'status': 'error', 'message': 'Invalid data'}), 400
 
         month_doc_id = f"Month_{month_param}"
-        converted = [{"row": i, "energy": row[0], "values": row[1:]} for i, row in enumerate(raw_data) if len(row) > 1]
-        
         firestore_field_name = f"data_{data_type}"
         doc_ref = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id)
+        
+        # --- [NEW] Proactive Chat Logic ---
+        old_data_doc = doc_ref.get()
+        old_data = old_data_doc.to_dict().get(firestore_field_name, []) if old_data_doc.exists else []
+        
+        new_warnings = find_new_warnings(old_data, raw_data, DATA_TYPE_CONFIGS[data_type])
+        
+        if new_warnings:
+            first_warning = new_warnings[0]
+            topic = "output_drift" if data_type == "output" else "flatness_warning"
+            db.collection("proactive_chats").add({
+                "uid": uid,
+                "read": False,
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "initial_message": f"I noticed a new warning for {first_warning['energy']} ({data_type.title()}). The value was {first_warning['value']}%. Would you like help diagnosing this?",
+                "topic": topic
+            })
+            app.logger.info(f"Proactive chat triggered for user {uid} due to new warnings.")
+        # --- End of Proactive Chat Logic ---
+
+        converted = [{"row": i, "energy": row[0], "values": row[1:]} for i, row in enumerate(raw_data) if len(row) > 1]
         doc_ref.set({firestore_field_name: converted}, merge=True)
         
         return jsonify({'status': 'success', 'message': f'{data_type} data saved successfully'}), 200
@@ -386,6 +426,7 @@ def save_data():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 @app.route('/data', methods=['GET'])
 def get_data():
@@ -723,7 +764,7 @@ def get_monthly_summary(center_id, month_key):
                         val = abs(float(value))
                         if val > config["tolerance"]:
                             oot += 1
-                        elif val >= config["warning"]: # MODIFIED THIS LINE
+                        elif val >= config["warning"]:
                             warnings += 1
                     except (ValueError, TypeError):
                         continue

@@ -723,7 +723,7 @@ def get_monthly_summary(center_id, month_key):
                         val = abs(float(value))
                         if val > config["tolerance"]:
                             oot += 1
-                        elif val > config["warning"]:
+                        elif val >= config["warning"]: # MODIFIED THIS LINE
                             warnings += 1
                     except (ValueError, TypeError):
                         continue

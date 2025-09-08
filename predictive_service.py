@@ -14,6 +14,7 @@ try:
         cred = credentials.Certificate(creds_json)
         print("Firebase credentials loaded from environment variable.")
     else:
+        # Fallback for local testing
         cred = credentials.Certificate("firebase_credentials.json")
         print("Firebase credentials file found locally.")
 except Exception as e:
@@ -25,6 +26,15 @@ if not firebase_admin._apps:
     print("Firebase default app initialized for predictive service.")
 
 db = firestore.client()
+
+# --- [NEW] FUNCTION TO DYNAMICALLY GET HOSPITAL IDS ---
+def get_all_hospitals():
+    """Fetches a unique list of hospital IDs from the users collection."""
+    print("Fetching list of hospitals from Firestore...")
+    users_ref = db.collection('users').stream()
+    hospital_ids = {user.to_dict().get('hospital') for user in users_ref if user.to_dict().get('hospital')}
+    print(f"Found {len(hospital_ids)} unique hospitals to process.")
+    return list(hospital_ids)
 
 # --- FUNCTION TO DELETE ONLY FUTURE PREDICTIONS ---
 def delete_future_predictions(center_id):
@@ -54,14 +64,12 @@ def fetch_service_events(center_id):
     Fetches all marked service/calibration dates for a specific center (hospital).
     """
     events = []
+    # Find any user associated with the hospital to get service events
     users_ref = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
-    user_uid = None
-    for user in users_ref:
-        user_uid = user.id
-        break
+    user_uid = next((user.id for user in users_ref), None)
 
     if not user_uid:
-        print(f"No user found for centerId: {center_id}")
+        print(f"No user found for centerId: {center_id} to fetch service events.")
         return None
 
     events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
@@ -158,12 +166,9 @@ def save_monthly_prediction(center_id, data_type, energy_type, month_key, foreca
 
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == '__main__':
-    HOSPITAL_IDS_TO_PROCESS = [
-        "aoi_aligarh", "aoi_coimbatore", "aoi_guntur", "aoi_gurugram", 
-        "aoi_hisar_2", "aoi_hisar_1", "aoi_imphal", "aoi_jammu", 
-        "aoi_kota", "aoi_ludhiana", "aoi_nagpur", "aoi_raipur", 
-        "aoi_ganganagar", "aoi_vijayawada", "aoi_hyderabad"
-    ]
+    # MODIFIED: Dynamically fetch hospital IDs instead of using a hardcoded list
+    HOSPITAL_IDS_TO_PROCESS = get_all_hospitals()
+    
     DATA_TYPES_TO_PROCESS = ["output", "flatness", "inline", "crossline"]
     ENERGY_TYPES_TO_PROCESS = [
         "6X", "10X", "15X", "6X FFF", "10X FFF", "6E", 
@@ -171,6 +176,7 @@ if __name__ == '__main__':
     ]
 
     for hospital_id in HOSPITAL_IDS_TO_PROCESS:
+        print(f"\n================ PROCESSING HOSPITAL: {hospital_id.upper()} ================")
         delete_future_predictions(hospital_id)
         
         service_events = fetch_service_events(hospital_id)
@@ -191,11 +197,9 @@ if __name__ == '__main__':
                     last_historical_date = all_data_df['ds'].max()
                     future_predictions = full_forecast[full_forecast['ds'] >= last_historical_date]
                     future_predictions['month_key'] = future_predictions['ds'].dt.strftime('%Y-%m')
-                    months_to_save = future_predictions['month_key'].unique()
-
-                    for month in months_to_save:
-                        monthly_forecast_chunk = future_predictions[future_predictions['month_key'] == month]
-                        final_chunk_to_save = monthly_forecast_chunk.head(31)
-                        save_monthly_prediction(hospital_id, data_type, energy, month, final_chunk_to_save)
+                    
+                    # Group by month and save each month's forecast as a separate document
+                    for month, group in future_predictions.groupby('month_key'):
+                        save_monthly_prediction(hospital_id, data_type, energy, month, group)
     
     print("\n\n--- All forecasts processed. Batch complete. ---")

@@ -371,7 +371,7 @@ def find_new_warnings(old_data, new_data, config):
                 continue
     return new_warnings
 
-# --- [MODIFIED] DATA SAVE ENDPOINT ---
+# --- DATA & ALERT ENDPOINTS ---
 @app.route('/save', methods=['POST'])
 def save_data():
     try:
@@ -389,15 +389,20 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
         user_data = user_doc.to_dict()
         center_id = user_data.get("centerId")
+        user_status = user_data.get("status", "pending")
 
+        if user_status != "active":
+            return jsonify({'status': 'error', 'message': 'Account not active'}), 403
         if not center_id:
             return jsonify({'status': 'error', 'message': 'Missing centerId'}), 400
+        if not isinstance(raw_data, list):
+            return jsonify({'status': 'error', 'message': 'Invalid data'}), 400
 
         month_doc_id = f"Month_{month_param}"
         firestore_field_name = f"data_{data_type}"
         doc_ref = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id)
         
-        # --- [NEW] Proactive Chat Logic ---
+        # --- Proactive Chat Logic ---
         old_data_doc = doc_ref.get()
         old_data = old_data_doc.to_dict().get(firestore_field_name, []) if old_data_doc.exists else []
         
@@ -414,7 +419,6 @@ def save_data():
                 "topic": topic
             })
             app.logger.info(f"Proactive chat triggered for user {uid} due to new warnings.")
-        # --- End of Proactive Chat Logic ---
 
         converted = [{"row": i, "energy": row[0], "values": row[1:]} for i, row in enumerate(raw_data) if len(row) > 1]
         doc_ref.set({firestore_field_name: converted}, merge=True)
@@ -426,7 +430,6 @@ def save_data():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
 
 @app.route('/data', methods=['GET'])
 def get_data():
@@ -470,6 +473,75 @@ def get_data():
         return jsonify({'data': table}), 200
     except Exception as e:
         app.logger.error(f"Get data failed for {data_type}: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'error': str(e)}), 500
+
+# --- [NEW] EXPORT TO EXCEL ENDPOINT ---
+@app.route('/export-excel', methods=['POST'])
+def export_excel():
+    try:
+        content = request.get_json(force=True)
+        month_param = content.get('month')
+        uid = content.get('uid')
+        data_type = content.get('dataType')
+
+        if not all([month_param, uid, data_type]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        user_doc = db.collection("users").document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+        user_data = user_doc.to_dict()
+        center_id = user_data.get("centerId")
+
+        if not center_id:
+            return jsonify({'error': 'Missing centerId for user'}), 400
+
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        
+        # Fetch data from Firestore
+        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            return jsonify({'error': 'No data found for the selected month'}), 404
+
+        firestore_field_name = f"data_{data_type}"
+        doc_data = doc.to_dict().get(firestore_field_name, [])
+        
+        if not doc_data:
+            return jsonify({'error': f'No {data_type} data found for the selected month'}), 404
+
+        # Prepare data for DataFrame
+        data_for_df = []
+        for row in doc_data:
+            energy = row.get("energy")
+            values = row.get("values", [])
+            padded_values = (values + [""] * num_days)[:num_days]
+            data_for_df.append([energy] + padded_values)
+
+        # Create column headers (Energy, 1, 2, 3, ...)
+        columns = ["Energy"] + list(range(1, num_days + 1))
+        
+        df = pd.DataFrame(data_for_df, columns=columns)
+
+        # Create an in-memory Excel file
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name=f'{data_type.title()} Data')
+        output.seek(0)
+        
+        # Send the file to the user
+        return send_file(
+            output,
+            download_name=f'LINAC_QA_{data_type.upper()}_{month_param}.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True
+        )
+    except Exception as e:
+        app.logger.error(f"Excel export failed for {data_type}: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500

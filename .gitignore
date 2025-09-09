@@ -1,0 +1,11 @@
+# Ignore secret credentials
+firebase_credentials.json
+
+# Ignore generated model files
+models/
+
+# Ignore Python cache files
+__pycache__/
+
+# Ignore Mac-specific files
+.DS_Store

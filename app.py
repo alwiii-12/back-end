@@ -45,7 +45,8 @@ import pandas as pd
 from io import BytesIO
 from prophet import Prophet
 
-
+# New imports for Correlation Analysis
+from scipy import stats
 import numpy as np 
 
 # Set nlp to None explicitly, as it's no longer loaded
@@ -431,6 +432,55 @@ def save_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# --- [NEW] ENDPOINT FOR SAVING DAILY ENVIRONMENTAL DATA ---
+@app.route('/save-daily-env', methods=['POST'])
+def save_daily_env():
+    try:
+        content = request.get_json(force=True)
+        uid = content.get("uid")
+        date = content.get("date") # Expecting "YYYY-MM-DD"
+        temperature = content.get("temperature")
+        pressure = content.get("pressure")
+
+        if not all([uid, date]):
+            return jsonify({'status': 'error', 'message': 'Missing UID or date'}), 400
+
+        user_doc = db.collection('users').document(uid).get()
+        if not user_doc.exists:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        center_id = user_doc.to_dict().get("centerId")
+
+        if not center_id:
+            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
+        
+        update_data = {}
+        if temperature is not None:
+            try:
+                update_data['temperature_celsius'] = float(temperature)
+            except (ValueError, TypeError):
+                pass # Ignore non-numeric values
+        if pressure is not None:
+            try:
+                update_data['pressure_hpa'] = float(pressure)
+            except (ValueError, TypeError):
+                pass
+
+        if not update_data:
+             return jsonify({'status': 'no_change', 'message': 'No valid data to save'}), 200
+
+        # Use set with merge=True to create or update the document
+        doc_ref = db.collection("linac_data").document(center_id).collection("daily_env").document(date)
+        doc_ref.set(update_data, merge=True)
+
+        return jsonify({'status': 'success', 'message': f'Environmental data for {date} saved'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Save daily env data failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/data', methods=['GET'])
 def get_data():
     try:
@@ -470,7 +520,15 @@ def get_data():
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
 
         table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
-        return jsonify({'data': table}), 200
+        
+        # Also fetch the environmental data for the whole month
+        env_data = {}
+        env_docs = db.collection("linac_data").document(center_id).collection("daily_env").stream()
+        for doc in env_docs:
+            if doc.id.startswith(month_param):
+                env_data[doc.id] = doc.to_dict()
+
+        return jsonify({'data': table, 'env_data': env_data}), 200
     except Exception as e:
         app.logger.error(f"Get data failed for {data_type}: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
@@ -1091,6 +1149,88 @@ def get_benchmark_metrics():
 
     except Exception as e:
         app.logger.error(f"Error getting benchmark metrics: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+        
+# --- [NEW] CORRELATION ANALYSIS ENDPOINT ---
+@app.route('/admin/correlation-analysis', methods=['GET'])
+def get_correlation_analysis():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    try:
+        hospital_id = request.args.get('hospitalId')
+        data_type = request.args.get('dataType')
+        energy = request.args.get('energy')
+
+        if not all([hospital_id, data_type, energy]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        # 1. Fetch all QA data
+        months_ref = db.collection("linac_data").document(hospital_id).collection("months").stream()
+        qa_values = []
+        for month_doc in months_ref:
+            month_data = month_doc.to_dict()
+            field_name = f"data_{data_type}"
+            if field_name in month_data:
+                month_id_str = month_doc.id.replace("Month_", "")
+                year, mon = map(int, month_id_str.split("-"))
+                for row_data in month_data[field_name]:
+                    if row_data.get("energy") == energy:
+                        for i, value in enumerate(row_data.get("values", [])):
+                            day = i + 1
+                            try:
+                                if value and day <= monthrange(year, mon)[1]:
+                                    date_str = f"{year}-{mon:02d}-{day:02d}"
+                                    qa_values.append({"date": date_str, "qa_value": float(value)})
+                            except (ValueError, TypeError):
+                                continue
+        
+        if not qa_values:
+            return jsonify({'error': 'No QA data found for the selected criteria.'}), 404
+
+        qa_df = pd.DataFrame(qa_values)
+        qa_df['date'] = pd.to_datetime(qa_df['date'])
+
+        # 2. Fetch all Environmental data
+        env_docs = db.collection("linac_data").document(hospital_id).collection("daily_env").stream()
+        env_values = []
+        for doc in env_docs:
+            data = doc.to_dict()
+            data['date'] = doc.id
+            env_values.append(data)
+        
+        if not env_values:
+            return jsonify({'error': 'No environmental data found for this hospital.'}), 404
+        
+        env_df = pd.DataFrame(env_values)
+        env_df['date'] = pd.to_datetime(env_df['date'])
+        
+        # 3. Merge and analyze
+        merged_df = pd.merge(qa_df, env_df, on='date', how='inner').dropna()
+
+        if len(merged_df) < 5: # Need at least a few points for meaningful correlation
+            return jsonify({'error': f'Not enough overlapping data points found ({len(merged_df)}).'}), 404
+        
+        results = {}
+        env_factors = ['temperature_celsius', 'pressure_hpa']
+
+        for factor in env_factors:
+            if factor in merged_df:
+                # Use scipy.stats.pearsonr to get both correlation and p-value
+                corr, p_value = stats.pearsonr(merged_df['qa_value'], merged_df[factor])
+                if np.isnan(corr): # Handle cases where variance is zero
+                    corr = 0.0
+                    p_value = 1.0
+                results[factor] = {'correlation': corr, 'p_value': p_value}
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        app.logger.error(f"Error in correlation analysis: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500

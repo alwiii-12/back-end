@@ -11,3 +11,4 @@ PyJWT
 scikit-learn
 prophet
 plotly
+scipy

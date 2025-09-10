@@ -26,6 +26,23 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
+# --- [NEW] FUNCTION TO DYNAMICALLY FETCH INSTITUTIONS ---
+def fetch_all_institution_ids():
+    """Fetches all centerIds from the institutions collection."""
+    print("Fetching all institution IDs from Firestore...")
+    ids = []
+    try:
+        institutions_ref = db.collection('institutions').stream()
+        for inst in institutions_ref:
+            # The document ID is the centerId
+            ids.append(inst.id)
+        print(f"Found {len(ids)} institutions to process.")
+        return ids
+    except Exception as e:
+        print(f"Error fetching institution IDs: {e}")
+        # Return empty list on error to prevent the script from crashing
+        return []
+
 # --- FUNCTION TO DELETE ONLY FUTURE PREDICTIONS ---
 def delete_future_predictions(center_id):
     """
@@ -54,6 +71,7 @@ def fetch_service_events(center_id):
     Fetches all marked service/calibration dates for a specific center (hospital).
     """
     events = []
+    # Find any user associated with the institution to get their service events
     users_ref = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
     user_uid = None
     for user in users_ref:
@@ -61,7 +79,7 @@ def fetch_service_events(center_id):
         break
 
     if not user_uid:
-        print(f"No user found for centerId: {center_id}")
+        print(f"No user found for centerId: {center_id}, cannot fetch service events.")
         return None
 
     events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
@@ -158,12 +176,13 @@ def save_monthly_prediction(center_id, data_type, energy_type, month_key, foreca
 
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == '__main__':
-    HOSPITAL_IDS_TO_PROCESS = [
-        "aoi_aligarh", "aoi_coimbatore", "aoi_guntur", "aoi_gurugram", 
-        "aoi_hisar_2", "aoi_hisar_1", "aoi_imphal", "aoi_jammu", 
-        "aoi_kota", "aoi_ludhiana", "aoi_nagpur", "aoi_raipur", 
-        "aoi_ganganagar", "aoi_vijayawada", "aoi_hyderabad"
-    ]
+    # [MODIFIED] Dynamically fetch hospital IDs instead of using a hardcoded list
+    HOSPITAL_IDS_TO_PROCESS = fetch_all_institution_ids()
+
+    if not HOSPITAL_IDS_TO_PROCESS:
+        print("No institutions found to process. Exiting script.")
+        exit()
+
     DATA_TYPES_TO_PROCESS = ["output", "flatness", "inline", "crossline"]
     ENERGY_TYPES_TO_PROCESS = [
         "6X", "10X", "15X", "6X FFF", "10X FFF", "6E", 

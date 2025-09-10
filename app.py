@@ -117,9 +117,13 @@ db = firestore.client()
 # --- APP CHECK VERIFICATION ---
 @app.before_request
 def verify_app_check_token():
-    app_check_token = request.headers.get('X-Firebase-AppCheck')
-    if request.method == 'OPTIONS' or request.path == '/':
+    # List of public paths that do not require App Check
+    public_paths = ['/', '/public/groups', '/public/institutions-by-group']
+    
+    if request.method == 'OPTIONS' or request.path in public_paths:
         return None
+        
+    app_check_token = request.headers.get('X-Firebase-AppCheck')
     if not app_check_token:
         app.logger.warning("App Check token missing.")
         return jsonify({'error': 'Unauthorized: App Check token is missing'}), 401
@@ -149,13 +153,42 @@ def verify_admin_token(id_token):
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token['uid']
         user_doc = db.collection('users').document(uid).get()
-        if user_doc.exists and user_doc.to_dict().get('role') == 'Admin':
-            return True, uid
+        user_data = user_doc.to_dict()
+        # Admins and Super Admins can access admin routes
+        if user_doc.exists and user_data.get('role') in ['Admin', 'Super Admin']:
+            return True, uid, user_data
     except Exception as e:
         app.logger.error(f"Token verification failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-    return False, None
+    return False, None, None
+
+# --- [NEW] PUBLIC ENDPOINTS FOR DYNAMIC SIGNUP ---
+@app.route('/public/groups', methods=['GET'])
+def get_public_groups():
+    """Fetches a unique list of all institution groups."""
+    try:
+        institutions_ref = db.collection('institutions').stream()
+        # Use a set to automatically handle uniqueness of group IDs
+        groups = {doc.to_dict().get('parentGroup') for doc in institutions_ref if doc.to_dict().get('parentGroup')}
+        return jsonify(sorted(list(groups))), 200
+    except Exception as e:
+        app.logger.error(f"Error fetching public groups: {str(e)}", exc_info=True)
+        return jsonify({'message': 'Could not retrieve organization list.'}), 500
+
+@app.route('/public/institutions-by-group', methods=['GET'])
+def get_public_institutions_by_group():
+    """Fetches a list of institutions belonging to a specific group."""
+    group_id = request.args.get('group')
+    if not group_id:
+        return jsonify({'message': 'Group ID is required.'}), 400
+    try:
+        institutions_ref = db.collection('institutions').where('parentGroup', '==', group_id).order_by('name').stream()
+        institutions = [{'name': doc.to_dict().get('name'), 'centerId': doc.to_dict().get('centerId')} for doc in institutions_ref]
+        return jsonify(institutions), 200
+    except Exception as e:
+        app.logger.error(f"Error fetching institutions for group {group_id}: {str(e)}", exc_info=True)
+        return jsonify({'message': 'Could not retrieve institution list.'}), 500
 
 # --- ANNOTATION ENDPOINTS ---
 @app.route('/save-annotation', methods=['POST'])
@@ -227,21 +260,32 @@ def delete_annotation():
 @app.route('/signup', methods=['POST'])
 def signup():
     try:
-        user = request.get_json(force=True)
+        user_data = request.get_json(force=True)
         required = ['name', 'email', 'hospital', 'role', 'uid', 'status']
-        missing = [f for f in required if f not in user or user[f].strip() == ""]
-        if missing:
-            return jsonify({'status': 'error', 'message': f'Missing fields: {", ".join(missing)}'}), 400
-        user_ref = db.collection('users').document(user['uid'])
+        if any(f not in user_data or not user_data[f] for f in required):
+            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+
+        # Find the parentGroup for the selected hospital
+        institution_doc = db.collection('institutions').document(user_data['hospital']).get()
+        if not institution_doc.exists:
+            return jsonify({'status': 'error', 'message': 'Selected institution not found.'}), 404
+        
+        parent_group = institution_doc.to_dict().get('parentGroup')
+        if not parent_group:
+            return jsonify({'status': 'error', 'message': 'Institution is not associated with a parent group.'}), 400
+
+        user_ref = db.collection('users').document(user_data['uid'])
         if user_ref.get().exists:
             return jsonify({'status': 'error', 'message': 'User already exists'}), 409
+            
         user_ref.set({
-            'name': user['name'],
-            'email': user['email'].strip().lower(),
-            'hospital': user['hospital'],
-            'role': user['role'],
-            'centerId': user['hospital'],
-            'status': user['status']
+            'name': user_data['name'],
+            'email': user_data['email'].strip().lower(),
+            'hospital': user_data['hospital'],
+            'role': user_data['role'],
+            'centerId': user_data['hospital'],
+            'status': user_data['status'],
+            'parentGroup': parent_group # Store the group ID with the user
         })
         return jsonify({'status': 'success', 'message': 'User registered'}), 200
     except Exception as e:
@@ -280,7 +324,7 @@ def login():
             "timestamp": firestore.SERVER_TIMESTAMP,
             "action": "user_login",
             "targetUserUid": uid,
-            "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
+            "hospital": user_data.get("hospital", "N/A"),
             "details": {
                 "user_email": user_data.get("email", "N/A"),
                 "user_agent": request.headers.get('User-Agent')
@@ -616,17 +660,22 @@ def send_alert():
         
         user_data = user_doc.to_dict()
         center_id = user_data.get('centerId')
-
+        
         if not center_id:
              return jsonify({'status': 'error', 'message': 'Center ID not found for user'}), 400
+        
+        # Find the RSOs for the user's parent group
+        parent_group = user_data.get('parentGroup')
+        if not parent_group:
+            return jsonify({'status': 'no_rso_email', 'message': 'User is not part of a group.'}), 200
 
-        rso_users_query = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO')
-        rso_users_stream = rso_users_query.stream()
+        # Find admins of that group, then find RSOs within that group's hospitals
+        admins_of_group_query = db.collection('users').where('managesGroup', '==', parent_group)
+        admins_stream = admins_of_group_query.stream()
+        admin_emails = [admin.to_dict()['email'] for admin in admins_stream if 'email' in admin.to_dict()]
         
-        rso_emails = [rso.to_dict()['email'] for rso in rso_users_stream if 'email' in rso.to_dict()]
-        
-        if not rso_emails:
-            return jsonify({'status': 'no_rso_email', 'message': 'No RSO email found for this hospital.'}), 200
+        if not admin_emails:
+            return jsonify({'status': 'no_rso_email', 'message': 'No Admin found for this user group.'}), 200
         
         current_out_values = content.get("outValues", [])
         hospital = content.get("hospitalName", "Unknown")
@@ -653,7 +702,7 @@ def send_alert():
         else:
             message_body += f"All previously detected {data_type_display} QA issues for this month are now resolved.\n"
 
-        email_sent = send_notification_email(", ".join(rso_emails), f"⚠ {data_type_display} QA Status - {hospital} ({month_key})", message_body)
+        email_sent = send_notification_email(", ".join(admin_emails), f"⚠ {data_type_display} QA Status - {hospital} ({month_key})", message_body)
 
         if email_sent:
             month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
@@ -903,7 +952,7 @@ def get_monthly_summary(center_id, month_key):
 @app.route('/dashboard-summary', methods=['GET'])
 def get_dashboard_summary():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid = verify_admin_token(token)
+    is_admin, admin_uid, admin_data = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     
@@ -912,27 +961,35 @@ def get_dashboard_summary():
         if not month_key:
             month_key = datetime.now().strftime('%Y-%m')
 
-        hospitals_ref = db.collection('users').stream()
-        unique_hospitals = {user.to_dict().get('hospital') for user in hospitals_ref if user.to_dict().get('hospital')}
+        # Get list of hospitals the admin can see
+        admin_role = admin_data.get('role')
+        if admin_role == 'Super Admin':
+             hospitals_ref = db.collection('institutions').stream()
+             visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
+        else: # Regular Admin
+            admin_group = admin_data.get('managesGroup')
+            hospitals_ref = db.collection('institutions').where('parentGroup', '==', admin_group).stream()
+            visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
 
         leaderboard = []
         total_warnings = 0
         total_oot = 0
 
-        for hospital in sorted(list(unique_hospitals)):
-            center_id = hospital
-            warnings, oot = get_monthly_summary(center_id, month_key)
+        for hospital_id in sorted(visible_hospitals):
+            warnings, oot = get_monthly_summary(hospital_id, month_key)
             total_warnings += warnings
             total_oot += oot
-            leaderboard.append({"hospital": hospital, "warnings": warnings, "oot": oot})
+            leaderboard.append({"hospital": hospital_id, "warnings": warnings, "oot": oot})
         
         pending_users_query = db.collection("users").where('status', '==', "pending")
+        if admin_role == 'Admin':
+            pending_users_query = pending_users_query.where('parentGroup', '==', admin_group)
+        
         pending_users_count = len(list(pending_users_query.stream()))
         
         leaderboard.sort(key=lambda x: (x['oot'], x['warnings']), reverse=True)
 
         return jsonify({
-            "role": "Admin",
             "pending_users_count": pending_users_count,
             "total_warnings": total_warnings,
             "total_oot": total_oot,
@@ -1058,7 +1115,7 @@ def log_event():
             "timestamp": firestore.SERVER_TIMESTAMP,
             "action": action, # e.g., 'user_logout'
             "targetUserUid": user_uid,
-            "hospital": user_data.get("hospital", "N/A").lower().replace(" ", "_"),
+            "hospital": user_data.get("hospital", "N/A"),
             "details": {
                 "user_email": user_data.get("email", "N/A"),
                 "user_agent": request.headers.get('User-Agent')
@@ -1090,7 +1147,6 @@ def verify_super_admin_token(id_token):
 
 @app.route('/superadmin/institutions', methods=['GET'])
 def get_institutions():
-    """Fetches a list of all institutions."""
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
     is_super_admin, _ = verify_super_admin_token(token)
     if not is_super_admin:
@@ -1108,7 +1164,6 @@ def get_institutions():
 
 @app.route('/superadmin/institutions', methods=['POST'])
 def add_institution():
-    """Adds a new institution to the database."""
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
     is_super_admin, _ = verify_super_admin_token(token)
     if not is_super_admin:
@@ -1118,8 +1173,9 @@ def add_institution():
         content = request.get_json(force=True)
         name = content.get('name')
         center_id = content.get('centerId')
-        if not all([name, center_id]):
-            return jsonify({'message': 'Missing institution name or centerId'}), 400
+        parent_group = content.get('parentGroup')
+        if not all([name, center_id, parent_group]):
+            return jsonify({'message': 'Missing name, centerId, or parentGroup'}), 400
 
         institution_ref = db.collection('institutions').document(center_id)
         if institution_ref.get().exists:
@@ -1128,6 +1184,7 @@ def add_institution():
         institution_ref.set({
             'name': name,
             'centerId': center_id,
+            'parentGroup': parent_group,
             'createdAt': firestore.SERVER_TIMESTAMP
         })
         return jsonify({'status': 'success', 'message': 'Institution added successfully'}), 201
@@ -1139,7 +1196,6 @@ def add_institution():
 
 @app.route('/superadmin/create-admin', methods=['POST'])
 def create_admin_user():
-    """Creates a new Admin user for an institution."""
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
     is_super_admin, super_admin_uid = verify_super_admin_token(token)
     if not is_super_admin:
@@ -1150,26 +1206,22 @@ def create_admin_user():
         email = content.get('email')
         password = content.get('password')
         name = content.get('name')
-        hospital = content.get('hospital') # This is the centerId
+        manages_group = content.get('managesGroup')
 
-        if not all([email, password, name, hospital]):
+        if not all([email, password, name, manages_group]):
             return jsonify({'message': 'Missing required fields for creating an admin'}), 400
 
-        # Step 1: Create user in Firebase Authentication
         new_user = auth.create_user(email=email, password=password, display_name=name)
 
-        # Step 2: Create user profile in Firestore
         user_ref = db.collection('users').document(new_user.uid)
         user_ref.set({
             'name': name,
             'email': email,
-            'hospital': hospital,
             'role': 'Admin',
-            'centerId': hospital,
-            'status': 'active' # Admins created by Super Admin are active by default
+            'status': 'active',
+            'managesGroup': manages_group
         })
 
-        # Step 3: Log the action in audit logs
         audit_entry = {
             "timestamp": firestore.SERVER_TIMESTAMP,
             "adminUid": super_admin_uid,
@@ -1177,7 +1229,7 @@ def create_admin_user():
             "targetUserUid": new_user.uid,
             "details": {
                 "created_user_email": email,
-                "assigned_hospital": hospital
+                "assigned_group": manages_group
             }
         }
         db.collection("audit_logs").add(audit_entry)
@@ -1190,7 +1242,6 @@ def create_admin_user():
         app.logger.error(f"Error creating admin user: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
-        # If Firestore write fails, delete the created auth user to prevent orphaned accounts
         if 'new_user' in locals() and new_user.uid:
             try:
                 auth.delete_user(new_user.uid)
@@ -1255,18 +1306,26 @@ def calculate_hospital_metrics(center_id, period_days=90):
 @app.route('/admin/benchmark-metrics', methods=['GET'])
 def get_benchmark_metrics():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
+    is_admin, _, admin_data = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
     try:
         period = int(request.args.get('period', 90))
         
-        users_ref = db.collection('users').stream()
-        unique_hospitals = sorted(list({user.to_dict().get('hospital') for user in users_ref if user.to_dict().get('hospital')}))
+        # Get list of hospitals the admin can see
+        admin_role = admin_data.get('role')
+        if admin_role == 'Super Admin':
+             hospitals_ref = db.collection('institutions').stream()
+             visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
+        else: # Regular Admin
+            admin_group = admin_data.get('managesGroup')
+            if not admin_group: return jsonify([]) # Admin not in a group
+            hospitals_ref = db.collection('institutions').where('parentGroup', '==', admin_group).stream()
+            visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
 
         benchmark_data = []
-        for hospital in unique_hospitals:
+        for hospital in visible_hospitals:
             metrics = calculate_hospital_metrics(hospital, period_days=period)
             benchmark_data.append(metrics)
         
@@ -1284,7 +1343,7 @@ def get_benchmark_metrics():
 @app.route('/admin/correlation-analysis', methods=['GET'])
 def get_correlation_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
+    is_admin, _, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1365,12 +1424,23 @@ def get_correlation_analysis():
 @app.route('/admin/users', methods=['GET'])
 def get_all_users():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
+    is_admin, _, admin_data = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
-        users = db.collection("users").stream()
-        return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users]), 200
+        users_query = db.collection("users")
+        
+        # Filter users based on admin's group
+        admin_role = admin_data.get('role')
+        if admin_role == 'Admin':
+            admin_group = admin_data.get('managesGroup')
+            if not admin_group: return jsonify([]) # Return empty if admin has no group
+            users_query = users_query.where('parentGroup', '==', admin_group)
+        
+        # Super Admins see all users, so no additional filter is needed for them.
+        
+        users_stream = users_query.stream()
+        return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users_stream]), 200
     except Exception as e:
         app.logger.error(f"Get all users failed: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
@@ -1380,7 +1450,7 @@ def get_all_users():
 @app.route('/admin/update-user-status', methods=['POST'])
 def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token)
+    is_admin, admin_uid_from_token, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     try:
@@ -1421,9 +1491,7 @@ def update_user_status():
             "action": "user_update",
             "targetUserUid": uid,
             "changes": {},
-            "oldData": {},
-            "newData": {},
-            "hospital": old_user_data.get("hospital", "N/A").lower().replace(" ", "_")
+            "hospital": old_user_data.get("hospital", "N/A")
         }
 
         if "status" in updates:
@@ -1458,7 +1526,7 @@ def update_user_status():
 @app.route('/admin/delete-user', methods=['DELETE'])
 def delete_user():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, admin_uid_from_token = verify_admin_token(token)
+    is_admin, admin_uid_from_token, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1503,7 +1571,7 @@ def delete_user():
 @app.route('/admin/hospital-data', methods=['GET'])
 def get_hospital_data():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
+    is_admin, _, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1545,7 +1613,7 @@ def get_hospital_data():
 @app.route('/admin/audit-logs', methods=['GET'])
 def get_audit_logs():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
+    is_admin, _, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
@@ -1648,7 +1716,7 @@ def fetch_data_for_period(hospital_id, start_date, end_date):
 @app.route('/admin/service-impact-analysis', methods=['GET'])
 def get_service_impact_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _ = verify_admin_token(token)
+    is_admin, _, _ = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 

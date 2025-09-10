@@ -183,8 +183,14 @@ def get_public_institutions_by_group():
     if not group_id:
         return jsonify({'message': 'Group ID is required.'}), 400
     try:
-        institutions_ref = db.collection('institutions').where('parentGroup', '==', group_id).order_by('name').stream()
+        # FIX: Removed the .order_by('name') which required a composite index.
+        institutions_ref = db.collection('institutions').where('parentGroup', '==', group_id).stream()
+        
         institutions = [{'name': doc.to_dict().get('name'), 'centerId': doc.to_dict().get('centerId')} for doc in institutions_ref]
+        
+        # Sort the list in Python after fetching to maintain alphabetical order for the user.
+        institutions.sort(key=lambda x: x.get('name', ''))
+        
         return jsonify(institutions), 200
     except Exception as e:
         app.logger.error(f"Error fetching institutions for group {group_id}: {str(e)}", exc_info=True)

@@ -1073,6 +1073,133 @@ def log_event():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# --- SUPER ADMIN ENDPOINTS ---
+def verify_super_admin_token(id_token):
+    """Verifies the token belongs to a Super Admin."""
+    try:
+        decoded_token = auth.verify_id_token(id_token)
+        uid = decoded_token['uid']
+        user_doc = db.collection('users').document(uid).get()
+        if user_doc.exists and user_doc.to_dict().get('role') == 'Super Admin':
+            return True, uid
+    except Exception as e:
+        app.logger.error(f"Super Admin Token verification failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+    return False, None
+
+@app.route('/superadmin/institutions', methods=['GET'])
+def get_institutions():
+    """Fetches a list of all institutions."""
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_super_admin, _ = verify_super_admin_token(token)
+    if not is_super_admin:
+        return jsonify({'message': 'Unauthorized: Super Admin access required'}), 403
+    
+    try:
+        institutions_ref = db.collection('institutions').order_by("name").stream()
+        institutions = [doc.to_dict() for doc in institutions_ref]
+        return jsonify(institutions), 200
+    except Exception as e:
+        app.logger.error(f"Error getting institutions: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
+@app.route('/superadmin/institutions', methods=['POST'])
+def add_institution():
+    """Adds a new institution to the database."""
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_super_admin, _ = verify_super_admin_token(token)
+    if not is_super_admin:
+        return jsonify({'message': 'Unauthorized: Super Admin access required'}), 403
+    
+    try:
+        content = request.get_json(force=True)
+        name = content.get('name')
+        center_id = content.get('centerId')
+        if not all([name, center_id]):
+            return jsonify({'message': 'Missing institution name or centerId'}), 400
+
+        institution_ref = db.collection('institutions').document(center_id)
+        if institution_ref.get().exists:
+            return jsonify({'message': 'Institution with this centerId already exists'}), 409
+        
+        institution_ref.set({
+            'name': name,
+            'centerId': center_id,
+            'createdAt': firestore.SERVER_TIMESTAMP
+        })
+        return jsonify({'status': 'success', 'message': 'Institution added successfully'}), 201
+    except Exception as e:
+        app.logger.error(f"Error adding institution: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
+@app.route('/superadmin/create-admin', methods=['POST'])
+def create_admin_user():
+    """Creates a new Admin user for an institution."""
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_super_admin, super_admin_uid = verify_super_admin_token(token)
+    if not is_super_admin:
+        return jsonify({'message': 'Unauthorized: Super Admin access required'}), 403
+
+    try:
+        content = request.get_json(force=True)
+        email = content.get('email')
+        password = content.get('password')
+        name = content.get('name')
+        hospital = content.get('hospital') # This is the centerId
+
+        if not all([email, password, name, hospital]):
+            return jsonify({'message': 'Missing required fields for creating an admin'}), 400
+
+        # Step 1: Create user in Firebase Authentication
+        new_user = auth.create_user(email=email, password=password, display_name=name)
+
+        # Step 2: Create user profile in Firestore
+        user_ref = db.collection('users').document(new_user.uid)
+        user_ref.set({
+            'name': name,
+            'email': email,
+            'hospital': hospital,
+            'role': 'Admin',
+            'centerId': hospital,
+            'status': 'active' # Admins created by Super Admin are active by default
+        })
+
+        # Step 3: Log the action in audit logs
+        audit_entry = {
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "adminUid": super_admin_uid,
+            "action": "superadmin_create_admin",
+            "targetUserUid": new_user.uid,
+            "details": {
+                "created_user_email": email,
+                "assigned_hospital": hospital
+            }
+        }
+        db.collection("audit_logs").add(audit_entry)
+
+        return jsonify({'status': 'success', 'message': f'Admin user {email} created successfully.'}), 201
+
+    except auth.EmailAlreadyExistsError:
+        return jsonify({'message': 'This email address is already in use.'}), 409
+    except Exception as e:
+        app.logger.error(f"Error creating admin user: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        # If Firestore write fails, delete the created auth user to prevent orphaned accounts
+        if 'new_user' in locals() and new_user.uid:
+            try:
+                auth.delete_user(new_user.uid)
+                app.logger.warning(f"Cleaned up orphaned auth user {new_user.uid} after creation failure.")
+            except Exception as cleanup_error:
+                app.logger.error(f"Failed to clean up orphaned auth user {new_user.uid}: {cleanup_error}")
+        return jsonify({'message': str(e)}), 500
+
+
 # --- ADMIN ENDPOINTS ---
 def calculate_hospital_metrics(center_id, period_days=90):
     all_numeric_values = {dtype: [] for dtype in DATA_TYPES}

@@ -654,6 +654,7 @@ def export_excel():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
+# --- [CORRECTED] SEND ALERT ENDPOINT ---
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
     try:
@@ -665,24 +666,22 @@ def send_alert():
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
         
         user_data = user_doc.to_dict()
-        center_id = user_data.get('centerId')
-        
+        center_id = user_data.get('centerId') # The specific hospital ID
+
         if not center_id:
              return jsonify({'status': 'error', 'message': 'Center ID not found for user'}), 400
-        
-        # Find the RSOs for the user's parent group
-        parent_group = user_data.get('parentGroup')
-        if not parent_group:
-            return jsonify({'status': 'no_rso_email', 'message': 'User is not part of a group.'}), 200
 
-        # Find admins of that group, then find RSOs within that group's hospitals
-        admins_of_group_query = db.collection('users').where('managesGroup', '==', parent_group)
-        admins_stream = admins_of_group_query.stream()
-        admin_emails = [admin.to_dict()['email'] for admin in admins_stream if 'email' in admin.to_dict()]
+        # --- FIX: Reverted to find RSO of the specific institution, not the Group Admin ---
+        rso_users_query = db.collection('users').where('centerId', '==', center_id).where('role', '==', 'RSO')
+        rso_users_stream = rso_users_query.stream()
         
-        if not admin_emails:
-            return jsonify({'status': 'no_rso_email', 'message': 'No Admin found for this user group.'}), 200
+        recipient_emails = [rso.to_dict()['email'] for rso in rso_users_stream if 'email' in rso.to_dict()]
         
+        if not recipient_emails:
+            app.logger.warning(f"No RSO found for centerId {center_id}. Cannot send alert.")
+            return jsonify({'status': 'no_rso_email', 'message': f'No RSO email found for hospital {center_id}.'}), 200
+        
+        # (The rest of the function's logic remains the same)
         current_out_values = content.get("outValues", [])
         hospital = content.get("hospitalName", "Unknown")
         month_key = content.get("month")
@@ -708,7 +707,7 @@ def send_alert():
         else:
             message_body += f"All previously detected {data_type_display} QA issues for this month are now resolved.\n"
 
-        email_sent = send_notification_email(", ".join(admin_emails), f"⚠ {data_type_display} QA Status - {hospital} ({month_key})", message_body)
+        email_sent = send_notification_email(", ".join(recipient_emails), f"⚠ {data_type_display} QA Status - {hospital} ({month_key})", message_body)
 
         if email_sent:
             month_alerts_doc_ref.set({"alerted_values": current_out_values}, merge=False)
@@ -969,13 +968,16 @@ def get_dashboard_summary():
 
         # Get list of hospitals the admin can see
         admin_role = admin_data.get('role')
+        visible_hospitals = []
+        admin_group = ""
         if admin_role == 'Super Admin':
              hospitals_ref = db.collection('institutions').stream()
              visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
         else: # Regular Admin
             admin_group = admin_data.get('managesGroup')
-            hospitals_ref = db.collection('institutions').where('parentGroup', '==', admin_group).stream()
-            visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
+            if admin_group:
+                hospitals_ref = db.collection('institutions').where('parentGroup', '==', admin_group).stream()
+                visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
 
         leaderboard = []
         total_warnings = 0
@@ -988,7 +990,7 @@ def get_dashboard_summary():
             leaderboard.append({"hospital": hospital_id, "warnings": warnings, "oot": oot})
         
         pending_users_query = db.collection("users").where('status', '==', "pending")
-        if admin_role == 'Admin':
+        if admin_role == 'Admin' and admin_group:
             pending_users_query = pending_users_query.where('parentGroup', '==', admin_group)
         
         pending_users_count = len(list(pending_users_query.stream()))
@@ -1321,6 +1323,7 @@ def get_benchmark_metrics():
         
         # Get list of hospitals the admin can see
         admin_role = admin_data.get('role')
+        visible_hospitals = []
         if admin_role == 'Super Admin':
              hospitals_ref = db.collection('institutions').stream()
              visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]

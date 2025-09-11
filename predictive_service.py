@@ -26,52 +26,58 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- [NEW] FUNCTION TO DYNAMICALLY FETCH INSTITUTIONS ---
-def fetch_all_institution_ids():
-    """Fetches all centerIds from the institutions collection."""
-    print("Fetching all institution IDs from Firestore...")
-    ids = []
+# --- [MODIFIED] FUNCTION TO DYNAMICALLY FETCH MACHINES ---
+def fetch_all_machine_ids():
+    """Fetches all machineIds from the linacs collection."""
+    print("Fetching all machine IDs from Firestore...")
+    machines = []
     try:
-        institutions_ref = db.collection('institutions').stream()
-        for inst in institutions_ref:
-            # The document ID is the centerId
-            ids.append(inst.id)
-        print(f"Found {len(ids)} institutions to process.")
-        return ids
+        machines_ref = db.collection('linacs').stream()
+        for machine in machines_ref:
+            machine_data = machine.to_dict()
+            machines.append({
+                "machineId": machine.id,
+                "centerId": machine_data.get("centerId")
+            })
+        print(f"Found {len(machines)} machines to process.")
+        return machines
     except Exception as e:
-        print(f"Error fetching institution IDs: {e}")
-        # Return empty list on error to prevent the script from crashing
+        print(f"Error fetching machine IDs: {e}")
         return []
 
-# --- FUNCTION TO DELETE ONLY FUTURE PREDICTIONS ---
-def delete_future_predictions(center_id):
+# --- [MODIFIED] FUNCTION TO DELETE ONLY FUTURE PREDICTIONS (MACHINE-AWARE) ---
+def delete_future_predictions(machine_id):
     """
-    Deletes predictions for future months to clean up before generating new ones,
-    but leaves the current month's prediction intact to be overwritten.
+    Deletes predictions for future months for a specific machine to clean up before generating new ones.
     """
-    print(f"Deleting future predictions for {center_id}...")
+    print(f"Deleting future predictions for machine {machine_id}...")
     current_month_str = datetime.now().strftime('%Y-%m')
-    predictions_ref = db.collection("linac_predictions").where("centerId", "==", center_id)
-    old_predictions = predictions_ref.stream()
+    
+    # This query is tricky because the machineId is part of the document ID
+    # We must fetch all and filter in Python.
+    predictions_ref = db.collection("linac_predictions").stream()
     
     deleted_count = 0
-    for doc in old_predictions:
-        doc_data = doc.to_dict()
-        forecast_month = doc_data.get("forecastMonth")
-        if forecast_month and forecast_month > current_month_str:
-            doc.reference.delete()
-            deleted_count += 1
+    for doc in predictions_ref:
+        if doc.id.startswith(machine_id):
+            doc_data = doc.to_dict()
+            forecast_month = doc_data.get("forecastMonth")
+            if forecast_month and forecast_month > current_month_str:
+                doc.reference.delete()
+                deleted_count += 1
     
-    print(f"Deleted {deleted_count} future prediction document(s).")
+    print(f"Deleted {deleted_count} future prediction document(s) for machine {machine_id}.")
 
 
-# --- FUNCTION TO FETCH SERVICE EVENTS ---
+# --- [MODIFIED] FUNCTION TO FETCH SERVICE EVENTS (CENTER-AWARE) ---
 def fetch_service_events(center_id):
     """
     Fetches all marked service/calibration dates for a specific center (hospital).
     """
+    if not center_id:
+        return None
+        
     events = []
-    # Find any user associated with the institution to get their service events
     users_ref = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
     user_uid = None
     for user in users_ref:
@@ -87,7 +93,7 @@ def fetch_service_events(center_id):
         events.append(event.id) 
     
     if not events:
-        print("No service/calibration events found.")
+        print(f"No service/calibration events found for center {center_id}.")
         return None
 
     holidays_df = pd.DataFrame({
@@ -96,16 +102,16 @@ def fetch_service_events(center_id):
         'lower_window': 0,
         'upper_window': 1,
     })
-    print(f"Found {len(events)} service/calibration events for user {user_uid}.")
+    print(f"Found {len(events)} service/calibration events for center {center_id}.")
     return holidays_df
 
-# --- DATA FETCHING FUNCTION ---
-def fetch_all_historical_data(center_id, data_type, energy_type):
+# --- [MODIFIED] DATA FETCHING FUNCTION (MACHINE-AWARE) ---
+def fetch_all_historical_data(machine_id, data_type, energy_type):
     """
-    Fetches ALL historical data up to the current date for a given combination.
+    Fetches ALL historical data up to the current date for a given machine.
     """
-    print(f"Fetching all historical data for {center_id}, {data_type}, {energy_type}...")
-    months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
+    print(f"Fetching all historical data for Machine: {machine_id}, {data_type}, {energy_type}...")
+    months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
     
     all_values = []
     for month_doc in months_ref:
@@ -150,8 +156,8 @@ def train_and_predict(full_df, service_events_df):
     
     return forecast
 
-# --- SAVE PREDICTION TO FIRESTORE ---
-def save_monthly_prediction(center_id, data_type, energy_type, month_key, forecast_chunk):
+# --- [MODIFIED] SAVE PREDICTION TO FIRESTORE (MACHINE-AWARE) ---
+def save_monthly_prediction(machine_id, center_id, data_type, energy_type, month_key, forecast_chunk):
     forecast_data = []
     for _, row in forecast_chunk.iterrows():
         forecast_data.append({
@@ -161,10 +167,11 @@ def save_monthly_prediction(center_id, data_type, energy_type, month_key, foreca
             "upper_bound": row['yhat_upper']
         })
 
-    prediction_doc_id = f"{center_id}_{data_type}_{energy_type}_{month_key}"
+    prediction_doc_id = f"{machine_id}_{data_type}_{energy_type}_{month_key}"
     doc_ref = db.collection("linac_predictions").document(prediction_doc_id)
     
     doc_ref.set({
+        "machineId": machine_id,
         "centerId": center_id,
         "dataType": data_type,
         "energy": energy_type,
@@ -172,15 +179,14 @@ def save_monthly_prediction(center_id, data_type, energy_type, month_key, foreca
         "forecast": forecast_data,
         "lastUpdated": firestore.SERVER_TIMESTAMP
     })
-    print(f"Successfully saved forecast for {month_key} to Firestore.")
+    print(f"Successfully saved forecast for {prediction_doc_id} to Firestore.")
 
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == '__main__':
-    # [MODIFIED] Dynamically fetch hospital IDs instead of using a hardcoded list
-    HOSPITAL_IDS_TO_PROCESS = fetch_all_institution_ids()
+    MACHINES_TO_PROCESS = fetch_all_machine_ids()
 
-    if not HOSPITAL_IDS_TO_PROCESS:
-        print("No institutions found to process. Exiting script.")
+    if not MACHINES_TO_PROCESS:
+        print("No machines found to process. Exiting script.")
         exit()
 
     DATA_TYPES_TO_PROCESS = ["output", "flatness", "inline", "crossline"]
@@ -189,16 +195,19 @@ if __name__ == '__main__':
         "9E", "12E", "15E", "18E"
     ]
 
-    for hospital_id in HOSPITAL_IDS_TO_PROCESS:
-        delete_future_predictions(hospital_id)
+    for machine in MACHINES_TO_PROCESS:
+        machine_id = machine["machineId"]
+        center_id = machine["centerId"]
         
-        service_events = fetch_service_events(hospital_id)
+        delete_future_predictions(machine_id)
+        
+        service_events = fetch_service_events(center_id)
 
         for data_type in DATA_TYPES_TO_PROCESS:
             for energy in ENERGY_TYPES_TO_PROCESS:
-                print(f"\n--- Processing: {hospital_id} / {data_type} / {energy} ---")
+                print(f"\n--- Processing: {center_id} / {machine_id} / {data_type} / {energy} ---")
                 
-                all_data_df = fetch_all_historical_data(hospital_id, data_type, energy)
+                all_data_df = fetch_all_historical_data(machine_id, data_type, energy)
                 
                 if all_data_df.empty:
                     print("No data found, skipping.")
@@ -215,6 +224,6 @@ if __name__ == '__main__':
                     for month in months_to_save:
                         monthly_forecast_chunk = future_predictions[future_predictions['month_key'] == month]
                         final_chunk_to_save = monthly_forecast_chunk.head(31)
-                        save_monthly_prediction(hospital_id, data_type, energy, month, final_chunk_to_save)
+                        save_monthly_prediction(machine_id, center_id, data_type, energy, month, final_chunk_to_save)
     
     print("\n\n--- All forecasts processed. Batch complete. ---")

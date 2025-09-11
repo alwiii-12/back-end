@@ -148,6 +148,21 @@ DATA_TYPE_CONFIGS = {
     "crossline": {"warning": 0.9, "tolerance": 1.0}
 }
 
+# --- [NEW] GENERIC USER TOKEN VERIFICATION ---
+def verify_user_token(id_token):
+    """Verifies a generic user token and returns their UID and user data."""
+    try:
+        decoded_token = auth.verify_id_token(id_token)
+        uid = decoded_token['uid']
+        user_doc = db.collection('users').document(uid).get()
+        if user_doc.exists:
+            return True, uid, user_doc.to_dict()
+    except Exception as e:
+        app.logger.error(f"User token verification failed: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+    return False, None, None
+
 # --- VERIFY ADMIN TOKEN ---
 def verify_admin_token(id_token):
     try:
@@ -432,9 +447,13 @@ def save_data():
         month_param = content.get("month")
         raw_data = content.get("data")
         data_type = content.get("dataType")
+        machine_id = content.get("machineId") # --- NEW: Get machineId ---
 
         if not data_type or data_type not in DATA_TYPES:
             return jsonify({'status': 'error', 'message': 'Invalid or missing dataType'}), 400
+        # --- NEW: Check for machineId ---
+        if not machine_id:
+            return jsonify({'status': 'error', 'message': 'machineId is required'}), 400
 
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
@@ -452,7 +471,8 @@ def save_data():
 
         month_doc_id = f"Month_{month_param}"
         firestore_field_name = f"data_{data_type}"
-        doc_ref = db.collection("linac_data").document(center_id).collection("months").document(month_doc_id)
+        # --- MODIFIED: Data is now stored under a machine's subcollection ---
+        doc_ref = db.collection("linac_data").document(machine_id).collection("months").document(month_doc_id)
         
         # --- Proactive Chat Logic ---
         old_data_doc = doc_ref.get()
@@ -653,6 +673,9 @@ def send_alert():
         uid = content.get("uid")
         machine_id = content.get("machineId") # --- NEW: Get machineId ---
 
+        if not all([uid, machine_id]):
+            return jsonify({'status': 'error', 'message': 'Missing uid or machineId'}), 400
+
         user_doc = db.collection('users').document(uid).get()
         if not user_doc.exists:
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
@@ -754,6 +777,30 @@ def update_live_forecast():
 def get_historical_forecast():
     # THIS ENDPOINT NEEDS TO BE UPDATED TO BE MACHINE-SPECIFIC
     return jsonify({'status': 'error', 'message': 'Endpoint not yet updated for multi-machine support.'}), 501
+
+# --- [NEW] ENDPOINT FOR USERS TO FETCH THEIR MACHINES ---
+@app.route('/user/machines', methods=['GET'])
+def get_user_machines():
+    """Gets all machines for the logged-in user's institution."""
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_valid, _, user_data = verify_user_token(token)
+    
+    if not is_valid or not user_data:
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    center_id = user_data.get('centerId')
+    if not center_id:
+        return jsonify({'message': 'User is not associated with an institution.'}), 400
+
+    try:
+        machines_ref = db.collection('linacs').where('centerId', '==', center_id).order_by('machineName').stream()
+        machines = [doc.to_dict() for doc in machines_ref]
+        return jsonify(machines), 200
+    except Exception as e:
+        app.logger.error(f"Error getting user machines for {center_id}: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
 
 # --- DASHBOARD & CHATBOT FUNCTIONS ---
 # ... (These do not need immediate changes for the basic multi-machine functionality)
@@ -1228,7 +1275,7 @@ def get_correlation_analysis():
         return jsonify({'message': 'Unauthorized'}), 403
 
     try:
-        hospital__id = request.args.get('hospitalId')
+        hospital_id = request.args.get('hospitalId')
         data_type = request.args.get('dataType')
         energy = request.args.get('energy')
 

@@ -793,8 +793,10 @@ def get_user_machines():
         return jsonify({'message': 'User is not associated with an institution.'}), 400
 
     try:
-        machines_ref = db.collection('linacs').where('centerId', '==', center_id).order_by('machineName').stream()
+        # --- [FIXED] Remove order_by and sort in Python to avoid composite index requirement ---
+        machines_ref = db.collection('linacs').where('centerId', '==', center_id).stream()
         machines = [doc.to_dict() for doc in machines_ref]
+        machines.sort(key=lambda x: x.get('machineName', ''))
         return jsonify(machines), 200
     except Exception as e:
         app.logger.error(f"Error getting user machines for {center_id}: {str(e)}", exc_info=True)
@@ -1130,8 +1132,10 @@ def get_machines_for_institution():
         return jsonify({'message': 'centerId query parameter is required'}), 400
 
     try:
-        machines_ref = db.collection('linacs').where('centerId', '==', center_id).order_by('machineName').stream()
+        # --- [FIXED] Remove order_by and sort in Python to avoid composite index requirement ---
+        machines_ref = db.collection('linacs').where('centerId', '==', center_id).stream()
         machines = [doc.to_dict() for doc in machines_ref]
+        machines.sort(key=lambda x: x.get('machineName', ''))
         return jsonify(machines), 200
     except Exception as e:
         app.logger.error(f"Error getting machines for {center_id}: {str(e)}", exc_info=True)

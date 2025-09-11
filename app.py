@@ -1204,7 +1204,6 @@ def calculate_machine_metrics(machine_id, period_days=90):
                         except (ValueError, TypeError):
                             continue
     
-    # [MODIFIED] Results now include machine info
     machine_doc = db.collection('linacs').document(machine_id).get()
     machine_name = machine_id
     hospital_name = "Unknown"
@@ -1234,7 +1233,7 @@ def calculate_machine_metrics(machine_id, period_days=90):
             
     return results
 
-# [MODIFIED] Endpoint now compares machines instead of hospitals
+# [MODIFIED] Endpoint now compares machines and can be filtered by hospital
 @app.route('/admin/benchmark-metrics', methods=['GET'])
 def get_benchmark_metrics():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1244,23 +1243,25 @@ def get_benchmark_metrics():
 
     try:
         period = int(request.args.get('period', 90))
+        hospital_filter = request.args.get('hospitalId') # New optional filter
         admin_role = admin_data.get('role')
         
-        # Get list of all machines the admin can see
         visible_machines_query = db.collection('linacs')
-        if admin_role == 'Admin':
+        
+        if hospital_filter:
+             visible_machines_query = visible_machines_query.where('centerId', '==', hospital_filter)
+        
+        elif admin_role == 'Admin':
             admin_group = admin_data.get('managesGroup')
             if not admin_group: return jsonify([])
             
-            # Get all hospitals in the admin's group
             hospitals_ref = db.collection('institutions').where('parentGroup', '==', admin_group).stream()
             hospital_ids = [inst.id for inst in hospitals_ref]
             
             if not hospital_ids: return jsonify([])
             
-            # Firestore 'in' queries are limited to 30 items
             if len(hospital_ids) > 30:
-                hospital_ids = hospital_ids[:30] # Limit to avoid error
+                hospital_ids = hospital_ids[:30]
 
             visible_machines_query = visible_machines_query.where('centerId', 'in', hospital_ids)
 
@@ -1297,13 +1298,11 @@ def get_correlation_analysis():
         if not all([machine_id, data_type, energy]):
             return jsonify({'error': 'Missing required parameters'}), 400
 
-        # Fetch the centerId from the machine document for environmental data
         machine_doc = db.collection('linacs').document(machine_id).get()
         if not machine_doc.exists:
             return jsonify({'error': 'Machine not found'}), 404
         hospital_id = machine_doc.to_dict().get('centerId')
 
-        # 1. Fetch all QA data for the specific machine
         months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
         qa_values = []
         for month_doc in months_ref:
@@ -1329,7 +1328,6 @@ def get_correlation_analysis():
         qa_df = pd.DataFrame(qa_values)
         qa_df['date'] = pd.to_datetime(qa_df['date'])
 
-        # 2. Fetch all Environmental data for the hospital
         env_docs = db.collection("linac_data").document(hospital_id).collection("daily_env").stream()
         env_values = []
         for doc in env_docs:
@@ -1343,7 +1341,6 @@ def get_correlation_analysis():
         env_df = pd.DataFrame(env_values)
         env_df['date'] = pd.to_datetime(env_df['date'])
         
-        # 3. Merge and analyze
         merged_df = pd.merge(qa_df, env_df, on='date', how='inner').dropna()
 
         if len(merged_df) < 5: 
@@ -1376,11 +1373,10 @@ def get_all_users():
     try:
         users_query = db.collection("users")
         
-        # Filter users based on admin's group
         admin_role = admin_data.get('role')
         if admin_role == 'Admin':
             admin_group = admin_data.get('managesGroup')
-            if not admin_group: return jsonify([]) # Return empty if admin has no group
+            if not admin_group: return jsonify([])
             users_query = users_query.where('parentGroup', '==', admin_group)
         
         users_stream = users_query.stream()

@@ -805,38 +805,6 @@ def get_user_machines():
         return jsonify({'message': str(e)}), 500
 
 # --- DASHBOARD & CHATBOT FUNCTIONS ---
-# ... (These do not need immediate changes for the basic multi-machine functionality)
-def get_monthly_summary(center_id, month_key, machine_id): # --- MODIFIED ---
-    warnings = 0
-    oot = 0
-    
-    # --- MODIFIED: Path is now machine-specific ---
-    doc_ref = db.collection("linac_data").document(machine_id).collection("months").document(f"Month_{month_key}").get()
-    if not doc_ref.exists:
-        return 0, 0
-    # ... rest of function is the same ...
-    month_data = doc_ref.to_dict()
-    for data_type, config in DATA_TYPE_CONFIGS.items():
-        field_name = f"data_{data_type}"
-        if field_name in month_data:
-            for row in month_data[field_name]:
-                for value in row.get("values", []):
-                    try:
-                        val = abs(float(value))
-                        if val > config["tolerance"]:
-                            oot += 1
-                        elif val >= config["warning"]:
-                            warnings += 1
-                    except (ValueError, TypeError):
-                        continue
-    return warnings, oot
-
-# ... (The rest of the file remains largely the same, but with many more machine_id additions needed)
-# ... (For this response, I have updated the most critical user-facing endpoints)
-@app.route('/dashboard-summary', methods=['GET'])
-def get_dashboard_summary():
-    # THIS ENDPOINT WOULD NEED SIGNIFICANT CHANGES TO AGGREGATE DATA ACROSS MACHINES
-    return jsonify({'status': 'error', 'message': 'Endpoint not yet updated for multi-machine support.'}), 501
 @app.route('/query-qa-data', methods=['POST'])
 def query_qa_data():
     try:
@@ -1199,21 +1167,24 @@ def delete_machine(machine_id):
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-# --- ADMIN ENDPOINTS ---
-def calculate_hospital_metrics(center_id, period_days=90):
+# --- [MODIFIED] ADMIN ANALYSIS ENDPOINTS ---
+
+# [MODIFIED] Helper function now calculates metrics for a single machine
+def calculate_machine_metrics(machine_id, period_days=90):
     all_numeric_values = {dtype: [] for dtype in DATA_TYPES}
     warnings = 0
     oots = 0
-    
     start_date = datetime.now() - timedelta(days=period_days)
     
-    months_ref = db.collection("linac_data").document(center_id).collection("months").stream()
+    months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
 
     for month_doc in months_ref:
         month_id_str = month_doc.id.replace("Month_", "")
-        month_dt = datetime.strptime(month_id_str, '%Y-%m')
-
-        if month_dt.year < start_date.year or (month_dt.year == start_date.year and month_dt.month < start_date.month):
+        try:
+            month_dt = datetime.strptime(month_id_str, '%Y-%m')
+            if month_dt.year < start_date.year or (month_dt.year == start_date.year and month_dt.month < start_date.month):
+                continue
+        except ValueError:
             continue
 
         month_data = month_doc.to_dict()
@@ -1228,13 +1199,25 @@ def calculate_hospital_metrics(center_id, period_days=90):
                             abs_val = abs(val)
                             if abs_val > config["tolerance"]:
                                 oots += 1
-                            elif abs_val > config["warning"]:
+                            elif abs_val >= config["warning"]:
                                 warnings += 1
                         except (ValueError, TypeError):
                             continue
     
+    # [MODIFIED] Results now include machine info
+    machine_doc = db.collection('linacs').document(machine_id).get()
+    machine_name = machine_id
+    hospital_name = "Unknown"
+    if machine_doc.exists:
+        machine_data = machine_doc.to_dict()
+        machine_name = machine_data.get("machineName", machine_id)
+        hospital_name = machine_data.get("centerId", "Unknown")
+
+
     results = {
-        "hospital": center_id,
+        "machineId": machine_id,
+        "machineName": machine_name,
+        "hospital": hospital_name,
         "warnings": warnings,
         "oots": oots,
         "metrics": {}
@@ -1250,6 +1233,8 @@ def calculate_hospital_metrics(center_id, period_days=90):
             results["metrics"][data_type] = { "mean_deviation": 0, "std_deviation": 0, "data_points": 0 }
             
     return results
+
+# [MODIFIED] Endpoint now compares machines instead of hospitals
 @app.route('/admin/benchmark-metrics', methods=['GET'])
 def get_benchmark_metrics():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1259,22 +1244,31 @@ def get_benchmark_metrics():
 
     try:
         period = int(request.args.get('period', 90))
-        
-        # Get list of hospitals the admin can see
         admin_role = admin_data.get('role')
-        visible_hospitals = []
-        if admin_role == 'Super Admin':
-             hospitals_ref = db.collection('institutions').stream()
-             visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
-        else: # Regular Admin
+        
+        # Get list of all machines the admin can see
+        visible_machines_query = db.collection('linacs')
+        if admin_role == 'Admin':
             admin_group = admin_data.get('managesGroup')
-            if not admin_group: return jsonify([]) # Admin not in a group
+            if not admin_group: return jsonify([])
+            
+            # Get all hospitals in the admin's group
             hospitals_ref = db.collection('institutions').where('parentGroup', '==', admin_group).stream()
-            visible_hospitals = [inst.to_dict().get('centerId') for inst in hospitals_ref]
+            hospital_ids = [inst.id for inst in hospitals_ref]
+            
+            if not hospital_ids: return jsonify([])
+            
+            # Firestore 'in' queries are limited to 30 items
+            if len(hospital_ids) > 30:
+                hospital_ids = hospital_ids[:30] # Limit to avoid error
 
+            visible_machines_query = visible_machines_query.where('centerId', 'in', hospital_ids)
+
+        all_machines = visible_machines_query.stream()
+        
         benchmark_data = []
-        for hospital in visible_hospitals:
-            metrics = calculate_hospital_metrics(hospital, period_days=period)
+        for machine in all_machines:
+            metrics = calculate_machine_metrics(machine.id, period_days=period)
             benchmark_data.append(metrics)
         
         benchmark_data.sort(key=lambda x: (x['oots'], x['warnings']), reverse=True)
@@ -1287,7 +1281,7 @@ def get_benchmark_metrics():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
         
-# --- [NEW] CORRELATION ANALYSIS ENDPOINT ---
+# [MODIFIED] Endpoint now requires machineId
 @app.route('/admin/correlation-analysis', methods=['GET'])
 def get_correlation_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1296,15 +1290,21 @@ def get_correlation_analysis():
         return jsonify({'message': 'Unauthorized'}), 403
 
     try:
-        hospital_id = request.args.get('hospitalId')
+        machine_id = request.args.get('machineId')
         data_type = request.args.get('dataType')
         energy = request.args.get('energy')
 
-        if not all([hospital_id, data_type, energy]):
+        if not all([machine_id, data_type, energy]):
             return jsonify({'error': 'Missing required parameters'}), 400
 
-        # 1. Fetch all QA data
-        months_ref = db.collection("linac_data").document(hospital_id).collection("months").stream()
+        # Fetch the centerId from the machine document for environmental data
+        machine_doc = db.collection('linacs').document(machine_id).get()
+        if not machine_doc.exists:
+            return jsonify({'error': 'Machine not found'}), 404
+        hospital_id = machine_doc.to_dict().get('centerId')
+
+        # 1. Fetch all QA data for the specific machine
+        months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
         qa_values = []
         for month_doc in months_ref:
             month_data = month_doc.to_dict()
@@ -1329,7 +1329,7 @@ def get_correlation_analysis():
         qa_df = pd.DataFrame(qa_values)
         qa_df['date'] = pd.to_datetime(qa_df['date'])
 
-        # 2. Fetch all Environmental data
+        # 2. Fetch all Environmental data for the hospital
         env_docs = db.collection("linac_data").document(hospital_id).collection("daily_env").stream()
         env_values = []
         for doc in env_docs:
@@ -1346,17 +1346,16 @@ def get_correlation_analysis():
         # 3. Merge and analyze
         merged_df = pd.merge(qa_df, env_df, on='date', how='inner').dropna()
 
-        if len(merged_df) < 5: # Need at least a few points for meaningful correlation
+        if len(merged_df) < 5: 
             return jsonify({'error': f'Not enough overlapping data points found ({len(merged_df)}).'}), 404
         
         results = {}
         env_factors = ['temperature_celsius', 'pressure_hpa']
 
         for factor in env_factors:
-            if factor in merged_df:
-                # Use scipy.stats.pearsonr to get both correlation and p-value
+            if factor in merged_df and len(merged_df[factor].unique()) > 1:
                 corr, p_value = stats.pearsonr(merged_df['qa_value'], merged_df[factor])
-                if np.isnan(corr): # Handle cases where variance is zero
+                if np.isnan(corr): 
                     corr = 0.0
                     p_value = 1.0
                 results[factor] = {'correlation': corr, 'p_value': p_value}
@@ -1383,8 +1382,6 @@ def get_all_users():
             admin_group = admin_data.get('managesGroup')
             if not admin_group: return jsonify([]) # Return empty if admin has no group
             users_query = users_query.where('parentGroup', '==', admin_group)
-        
-        # Super Admins see all users, so no additional filter is needed for them.
         
         users_stream = users_query.stream()
         return jsonify([doc.to_dict() | {"uid": doc.id} for doc in users_stream]), 200
@@ -1512,6 +1509,7 @@ def delete_user():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
+# [MODIFIED] Endpoint now takes a machineId
 @app.route('/admin/hospital-data', methods=['GET'])
 def get_hospital_data():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1520,18 +1518,17 @@ def get_hospital_data():
         return jsonify({'message': 'Unauthorized'}), 403
 
     try:
-        hospital_id = request.args.get('hospitalId')
+        machine_id = request.args.get('machineId')
         month_param = request.args.get('month')
-        if not hospital_id or not month_param:
-            return jsonify({'error': 'Missing hospitalId or month parameter'}), 400
+        if not machine_id or not month_param:
+            return jsonify({'error': 'Missing machineId or month parameter'}), 400
 
-        center_id = hospital_id
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
         
         all_data = {}
         for data_type in DATA_TYPES:
-            doc_ref = db.collection("linac_data").document(center_id).collection("months").document(f"Month_{month_param}")
+            doc_ref = db.collection("linac_data").document(machine_id).collection("months").document(f"Month_{month_param}")
             doc = doc_ref.get()
             
             energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
@@ -1613,15 +1610,14 @@ def get_audit_logs():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
-# --- [NEW] HELPER FUNCTION FOR SERVICE ANALYSIS ---
-def fetch_data_for_period(hospital_id, start_date, end_date):
+
+# [MODIFIED] Helper function now takes a machineId
+def fetch_data_for_period(machine_id, start_date, end_date):
     """
-    Fetches all 'output' data for a hospital within a specific date range,
-    spanning across monthly documents if necessary.
+    Fetches all 'output' data for a specific machine within a date range.
     """
     data_points = {}
     
-    # Determine the months to query
     months_to_check = set()
     current_date = start_date
     while current_date <= end_date:
@@ -1629,7 +1625,7 @@ def fetch_data_for_period(hospital_id, start_date, end_date):
         current_date += timedelta(days=1)
     
     for month_doc_id in months_to_check:
-        month_doc = db.collection("linac_data").document(hospital_id).collection("months").document(month_doc_id).get()
+        month_doc = db.collection("linac_data").document(machine_id).collection("months").document(month_doc_id).get()
         if not month_doc.exists:
             continue
         
@@ -1654,7 +1650,7 @@ def fetch_data_for_period(hospital_id, start_date, end_date):
     return data_points
 
 
-# --- [NEW] SERVICE IMPACT ANALYSIS ENDPOINT ---
+# [MODIFIED] Endpoint now takes a machineId
 @app.route('/admin/service-impact-analysis', methods=['GET'])
 def get_service_impact_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1662,17 +1658,21 @@ def get_service_impact_analysis():
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
-    hospital_id = request.args.get('hospitalId')
-    if not hospital_id:
-        return jsonify({'message': 'hospitalId is required'}), 400
+    machine_id = request.args.get('machineId')
+    if not machine_id:
+        return jsonify({'message': 'machineId is required'}), 400
 
     try:
-        # Find a user for the given hospital to locate service events
-        users_query = db.collection('users').where('hospital', '==', hospital_id).limit(1).stream()
+        # Find a user for the given machine to locate service events
+        machine_doc = db.collection('linacs').document(machine_id).get()
+        if not machine_doc.exists: return jsonify([])
+        center_id = machine_doc.to_dict().get('centerId')
+
+        users_query = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
         user_uid = next((user.id for user in users_query), None)
         
         if not user_uid:
-            return jsonify([]) # Return empty list if no user/events found
+            return jsonify([])
 
         service_events_ref = db.collection('service_events').document(user_uid).collection('events')
         service_events = service_events_ref.stream()
@@ -1682,15 +1682,13 @@ def get_service_impact_analysis():
         for event in service_events:
             service_date = datetime.strptime(event.id, "%Y-%m-%d")
             
-            # Define before and after periods
             before_start = service_date - timedelta(days=14)
             before_end = service_date - timedelta(days=1)
             after_start = service_date + timedelta(days=1)
             after_end = service_date + timedelta(days=14)
             
-            # Fetch data for both periods
-            before_data_by_energy = fetch_data_for_period(hospital_id, before_start, before_end)
-            after_data_by_energy = fetch_data_for_period(hospital_id, after_start, after_end)
+            before_data_by_energy = fetch_data_for_period(machine_id, before_start, before_end)
+            after_data_by_energy = fetch_data_for_period(machine_id, after_start, after_end)
 
             processed_energies = set(before_data_by_energy.keys()) | set(after_data_by_energy.keys())
 
@@ -1701,23 +1699,14 @@ def get_service_impact_analysis():
                 if not before_values or not after_values:
                     continue
 
-                # Calculate metrics
-                before_metrics = {
-                    "mean_deviation": np.mean(before_values),
-                    "std_deviation": np.std(before_values)
-                }
-                after_metrics = {
-                    "mean_deviation": np.mean(after_values),
-                    "std_deviation": np.std(after_values)
-                }
+                before_metrics = { "mean_deviation": np.mean(before_values), "std_deviation": np.std(before_values) }
+                after_metrics = { "mean_deviation": np.mean(after_values), "std_deviation": np.std(after_values) }
                 
-                # Calculate improvement
                 improvement = 0
                 if before_metrics["std_deviation"] > 0:
                     improvement = ((before_metrics["std_deviation"] - after_metrics["std_deviation"]) / before_metrics["std_deviation"]) * 100
 
                 analysis_results.append({
-                    "hospital": hospital_id,
                     "service_date": event.id,
                     "energy": energy,
                     "before_metrics": before_metrics,
@@ -1727,7 +1716,6 @@ def get_service_impact_analysis():
                     "after_data": after_values
                 })
 
-        # Sort results by date descending
         analysis_results.sort(key=lambda x: x['service_date'], reverse=True)
         
         return jsonify(analysis_results), 200

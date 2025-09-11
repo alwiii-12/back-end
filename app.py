@@ -766,17 +766,87 @@ def get_predictions():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- The following prediction endpoints would also need to be updated to be machine-specific ---
-# --- For brevity, they are left as-is, but would follow the same pattern of adding machine_id ---
 @app.route('/update-live-forecast', methods=['POST'])
 def update_live_forecast():
     # THIS ENDPOINT NEEDS TO BE UPDATED TO BE MACHINE-SPECIFIC
     return jsonify({'status': 'error', 'message': 'Endpoint not yet updated for multi-machine support.'}), 501
 
+# [MODIFIED] Endpoint now fully supports multi-machine
 @app.route('/historical-forecast', methods=['POST'])
 def get_historical_forecast():
-    # THIS ENDPOINT NEEDS TO BE UPDATED TO BE MACHINE-SPECIFIC
-    return jsonify({'status': 'error', 'message': 'Endpoint not yet updated for multi-machine support.'}), 501
+    try:
+        content = request.get_json(force=True)
+        uid = content.get('uid')
+        month = content.get('month')
+        data_type = content.get('dataType')
+        energy = content.get('energy')
+        machine_id = content.get('machineId')
+
+        if not all([uid, month, data_type, energy, machine_id]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+        
+        is_valid, _, user_data = verify_user_token(uid)
+        if not is_valid:
+            return jsonify({'error': 'Invalid user'}), 403
+
+        # This helper function is defined in the predictive_service.py but we need it here too.
+        # For simplicity, we redefine it here. In a larger app, this would be in a shared module.
+        def fetch_historical_for_machine(m_id, dt, et, end_date_str):
+            months_ref = db.collection("linac_data").document(m_id).collection("months").stream()
+            all_vals = []
+            end_date = datetime.strptime(end_date_str, '%Y-%m')
+            
+            for month_doc in months_ref:
+                month_id_str = month_doc.id.replace("Month_", "")
+                if month_id_str >= end_date_str: continue
+
+                month_data = month_doc.to_dict()
+                field_name = f"data_{dt}"
+                if field_name in month_data:
+                    year, mon = map(int, month_id_str.split("-"))
+                    for row_data in month_data[field_name]:
+                        if row_data.get("energy") == et:
+                            for i, value in enumerate(row_data.get("values", [])):
+                                day = i + 1
+                                try:
+                                    if value and day <= monthrange(year, mon)[1]:
+                                        all_vals.append({"ds": pd.to_datetime(f"{year}-{mon}-{day}"), "y": float(value)})
+                                except (ValueError, TypeError):
+                                    continue
+            return pd.DataFrame(all_vals)
+
+        historical_df = fetch_historical_for_machine(machine_id, data_type, energy, month)
+        
+        if historical_df.empty or len(historical_df) < 10:
+            return jsonify({'error': 'Not enough historical data to generate a forecast.'}), 400
+
+        model = Prophet()
+        model.fit(historical_df)
+        
+        year, mon = map(int, month.split('-'))
+        _, num_days = monthrange(year, mon)
+        
+        future_dates = [pd.to_datetime(f"{year}-{mon}-{d}") for d in range(1, num_days + 1)]
+        future_df = pd.DataFrame(future_dates, columns=['ds'])
+        
+        forecast = model.predict(future_df)
+
+        actuals = [None] * num_days
+        current_month_data_ref = db.collection("linac_data").document(machine_id).collection("months").document(f"Month_{month}").get()
+        if current_month_data_ref.exists:
+            data_field = current_month_data_ref.to_dict().get(f"data_{data_type}", [])
+            energy_row = next((row for row in data_field if row.get("energy") == energy), None)
+            if energy_row:
+                for i, val in enumerate(energy_row.get("values", [])):
+                    try: actuals[i] = float(val)
+                    except (ValueError, TypeError): continue
+        
+        return jsonify({'forecast': json.loads(forecast.to_json(orient='records')), 'actuals': actuals})
+
+    except Exception as e:
+        app.logger.error(f"Error in historical forecast: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 
 # --- [NEW] ENDPOINT FOR USERS TO FETCH THEIR MACHINES ---
 @app.route('/user/machines', methods=['GET'])
@@ -1168,8 +1238,6 @@ def delete_machine(machine_id):
         return jsonify({'message': str(e)}), 500
 
 # --- [MODIFIED] ADMIN ANALYSIS ENDPOINTS ---
-
-# [MODIFIED] Helper function now calculates metrics for a single machine
 def calculate_machine_metrics(machine_id, period_days=90):
     all_numeric_values = {dtype: [] for dtype in DATA_TYPES}
     warnings = 0
@@ -1233,7 +1301,6 @@ def calculate_machine_metrics(machine_id, period_days=90):
             
     return results
 
-# [MODIFIED] Endpoint now compares machines and can be filtered by hospital
 @app.route('/admin/benchmark-metrics', methods=['GET'])
 def get_benchmark_metrics():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1243,7 +1310,7 @@ def get_benchmark_metrics():
 
     try:
         period = int(request.args.get('period', 90))
-        hospital_filter = request.args.get('hospitalId') # New optional filter
+        hospital_filter = request.args.get('hospitalId')
         admin_role = admin_data.get('role')
         
         visible_machines_query = db.collection('linacs')
@@ -1282,7 +1349,6 @@ def get_benchmark_metrics():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
         
-# [MODIFIED] Endpoint now requires machineId
 @app.route('/admin/correlation-analysis', methods=['GET'])
 def get_correlation_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]

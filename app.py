@@ -1023,6 +1023,27 @@ def add_institution():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
+
+# --- [NEW] ENDPOINT TO DELETE AN INSTITUTION ---
+@app.route('/superadmin/institution/<center_id>', methods=['DELETE'])
+def delete_institution(center_id):
+    """Deletes an institution. NOTE: This does not delete associated machines or users."""
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_super_admin, _ = verify_super_admin_token(token)
+    if not is_super_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    try:
+        db.collection('institutions').document(center_id).delete()
+        # NOTE: For a production system, you might want to handle orphaned users/machines
+        # in a more sophisticated way (e.g., a cleanup script or archiving).
+        return jsonify({'status': 'success', 'message': 'Institution deleted successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Error deleting institution {center_id}: {str(e)}", exc_info=True)
+        if sentry_sdk_configured:
+            sentry_sdk.capture_exception(e)
+        return jsonify({'message': str(e)}), 500
+
 @app.route('/superadmin/create-admin', methods=['POST'])
 def create_admin_user():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1079,13 +1100,13 @@ def create_admin_user():
                 app.logger.error(f"Failed to clean up orphaned auth user {new_user.uid}: {cleanup_error}")
         return jsonify({'message': str(e)}), 500
 
-# --- MACHINE MANAGEMENT ENDPOINTS (SUPER ADMIN) ---
-@app.route('/superadmin/machines', methods=['POST'])
+# --- [MODIFIED] MACHINE MANAGEMENT ENDPOINTS (NOW FOR ADMINS) ---
+@app.route('/admin/machines', methods=['POST'])
 def add_machines():
     """Adds one or more new LINAC machines to an institution."""
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_super_admin, _ = verify_super_admin_token(token)
-    if not is_super_admin:
+    is_admin, _, _ = verify_admin_token(token)
+    if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     
     try:
@@ -1116,23 +1137,19 @@ def add_machines():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
-@app.route('/superadmin/machines', methods=['GET'])
+@app.route('/admin/machines', methods=['GET'])
 def get_machines_for_institution():
     """Gets all machines for a specific institution."""
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_super_admin, _ = verify_super_admin_token(token)
-    if not is_super_admin:
-        # Also allow regular Admins to get machine lists for their group's institutions
-        is_admin, _, admin_data = verify_admin_token(token)
-        if not is_admin:
-            return jsonify({'message': 'Unauthorized'}), 403
+    is_admin, _, _ = verify_admin_token(token)
+    if not is_admin:
+        return jsonify({'message': 'Unauthorized'}), 403
             
     center_id = request.args.get('centerId')
     if not center_id:
         return jsonify({'message': 'centerId query parameter is required'}), 400
 
     try:
-        # --- [FIXED] Remove order_by and sort in Python to avoid composite index requirement ---
         machines_ref = db.collection('linacs').where('centerId', '==', center_id).stream()
         machines = [doc.to_dict() for doc in machines_ref]
         machines.sort(key=lambda x: x.get('machineName', ''))
@@ -1142,12 +1159,12 @@ def get_machines_for_institution():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
-@app.route('/superadmin/machine/<machine_id>', methods=['PUT'])
+@app.route('/admin/machine/<machine_id>', methods=['PUT'])
 def update_machine(machine_id):
     """Updates a machine's name."""
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_super_admin, _ = verify_super_admin_token(token)
-    if not is_super_admin:
+    is_admin, _, _ = verify_admin_token(token)
+    if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
     
     try:
@@ -1164,12 +1181,12 @@ def update_machine(machine_id):
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
-@app.route('/superadmin/machine/<machine_id>', methods=['DELETE'])
+@app.route('/admin/machine/<machine_id>', methods=['DELETE'])
 def delete_machine(machine_id):
     """Deletes a machine record."""
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_super_admin, _ = verify_super_admin_token(token)
-    if not is_super_admin:
+    is_admin, _, _ = verify_admin_token(token)
+    if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
         
     try:

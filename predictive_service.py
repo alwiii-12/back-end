@@ -26,7 +26,7 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- [MODIFIED] FUNCTION TO DYNAMICALLY FETCH MACHINES ---
+# --- FUNCTION TO DYNAMICALLY FETCH MACHINES ---
 def fetch_all_machine_ids():
     """Fetches all machineIds from the linacs collection."""
     print("Fetching all machine IDs from Firestore...")
@@ -45,7 +45,7 @@ def fetch_all_machine_ids():
         print(f"Error fetching machine IDs: {e}")
         return []
 
-# --- [MODIFIED] FUNCTION TO DELETE ONLY FUTURE PREDICTIONS (MACHINE-AWARE) ---
+# --- FUNCTION TO DELETE ONLY FUTURE PREDICTIONS (MACHINE-AWARE) ---
 def delete_future_predictions(machine_id):
     """
     Deletes predictions for future months for a specific machine to clean up before generating new ones.
@@ -53,8 +53,6 @@ def delete_future_predictions(machine_id):
     print(f"Deleting future predictions for machine {machine_id}...")
     current_month_str = datetime.now().strftime('%Y-%m')
     
-    # This query is tricky because the machineId is part of the document ID
-    # We must fetch all and filter in Python.
     predictions_ref = db.collection("linac_predictions").stream()
     
     deleted_count = 0
@@ -68,32 +66,22 @@ def delete_future_predictions(machine_id):
     
     print(f"Deleted {deleted_count} future prediction document(s) for machine {machine_id}.")
 
-
-# --- [MODIFIED] FUNCTION TO FETCH SERVICE EVENTS (CENTER-AWARE) ---
-def fetch_service_events(center_id):
+# --- [MODIFIED] FUNCTION TO FETCH SERVICE EVENTS (MACHINE-AWARE) ---
+def fetch_service_events(machine_id):
     """
-    Fetches all marked service/calibration dates for a specific center (hospital).
+    Fetches all marked service/calibration dates for a specific machine.
     """
-    if not center_id:
+    if not machine_id:
         return None
         
     events = []
-    users_ref = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
-    user_uid = None
-    for user in users_ref:
-        user_uid = user.id
-        break
-
-    if not user_uid:
-        print(f"No user found for centerId: {center_id}, cannot fetch service events.")
-        return None
-
-    events_ref = db.collection('service_events').document(user_uid).collection('events').stream()
+    # [MODIFIED] Path is now machine-centric, removing the need to find a user.
+    events_ref = db.collection('linac_data').document(machine_id).collection('service_events').stream()
     for event in events_ref:
         events.append(event.id) 
     
     if not events:
-        print(f"No service/calibration events found for center {center_id}.")
+        print(f"No service/calibration events found for machine {machine_id}.")
         return None
 
     holidays_df = pd.DataFrame({
@@ -102,10 +90,10 @@ def fetch_service_events(center_id):
         'lower_window': 0,
         'upper_window': 1,
     })
-    print(f"Found {len(events)} service/calibration events for center {center_id}.")
+    print(f"Found {len(events)} service/calibration events for machine {machine_id}.")
     return holidays_df
 
-# --- [MODIFIED] DATA FETCHING FUNCTION (MACHINE-AWARE) ---
+# --- DATA FETCHING FUNCTION (MACHINE-AWARE) ---
 def fetch_all_historical_data(machine_id, data_type, energy_type):
     """
     Fetches ALL historical data up to the current date for a given machine.
@@ -156,7 +144,7 @@ def train_and_predict(full_df, service_events_df):
     
     return forecast
 
-# --- [MODIFIED] SAVE PREDICTION TO FIRESTORE (MACHINE-AWARE) ---
+# --- SAVE PREDICTION TO FIRESTORE (MACHINE-AWARE) ---
 def save_monthly_prediction(machine_id, center_id, data_type, energy_type, month_key, forecast_chunk):
     forecast_data = []
     for _, row in forecast_chunk.iterrows():
@@ -201,7 +189,8 @@ if __name__ == '__main__':
         
         delete_future_predictions(machine_id)
         
-        service_events = fetch_service_events(center_id)
+        # [MODIFIED] Pass the machine_id directly to fetch its specific service events.
+        service_events = fetch_service_events(machine_id)
 
         for data_type in DATA_TYPES_TO_PROCESS:
             for energy in ENERGY_TYPES_TO_PROCESS:

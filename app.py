@@ -119,7 +119,7 @@ db = firestore.client()
 @app.before_request
 def verify_app_check_token():
     # List of public paths that do not require App Check
-    public_paths = ['/', '/public/groups', '/public/institutions-by-group']
+    public_paths = ['/', '/public/groups', '/public/institutions-by-group', '/public/all-institutions']
     
     if request.method == 'OPTIONS' or request.path in public_paths:
         return None
@@ -212,37 +212,52 @@ def get_public_institutions_by_group():
         app.logger.error(f"Error fetching institutions for group {group_id}: {str(e)}", exc_info=True)
         return jsonify({'message': 'Could not retrieve institution list.'}), 500
 
-# --- ANNOTATION ENDPOINTS ---
+# --- [NEW] PUBLIC ENDPOINT FOR ALL INSTITUTIONS (FOR PROFILE PAGE) ---
+@app.route('/public/all-institutions', methods=['GET'])
+def get_all_institutions():
+    """Fetches a list of all institutions."""
+    try:
+        institutions_ref = db.collection('institutions').stream()
+        institutions = [{'name': doc.to_dict().get('name'), 'centerId': doc.to_dict().get('centerId')} for doc in institutions_ref]
+        institutions.sort(key=lambda x: x.get('name', ''))
+        return jsonify(institutions), 200
+    except Exception as e:
+        app.logger.error(f"Error fetching all institutions: {str(e)}", exc_info=True)
+        return jsonify({'message': 'Could not retrieve institution list.'}), 500
+
+# --- [MODIFIED] ANNOTATION ENDPOINTS (MACHINE-AWARE) ---
 @app.route('/save-annotation', methods=['POST'])
 def save_annotation():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        machine_id = content.get("machineId")
         month = content.get("month")
         key = content.get("key")
         data = content.get("data")
 
-        if not all([uid, month, key, data]):
+        if not all([machine_id, month, key, data]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
-        annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
+        # [MODIFIED] Path is now machine-centric
+        annotation_ref = db.collection('linac_data').document(machine_id).collection('annotations').document(month).collection('keys').document(key)
         annotation_ref.set(data)
 
         is_service_event = data.get('isServiceEvent', False)
         event_date = data.get('eventDate')
         
         if event_date:
-            service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
+            # [MODIFIED] Path is now machine-centric
+            service_event_ref = db.collection('linac_data').document(machine_id).collection('service_events').document(event_date)
             if is_service_event:
                 service_event_ref.set({
                     'description': data.get('text', 'Service/Calibration'),
                     'energy': data.get('energy'),
                     'dataType': data.get('dataType')
                 })
-                app.logger.info(f"Service event marked for user {uid} on date {event_date}")
+                app.logger.info(f"Service event marked for machine {machine_id} on date {event_date}")
             else:
                 service_event_ref.delete()
-                app.logger.info(f"Service event unmarked for user {uid} on date {event_date}")
+                app.logger.info(f"Service event unmarked for machine {machine_id} on date {event_date}")
 
         return jsonify({'status': 'success', 'message': 'Annotation saved successfully'}), 200
     except Exception as e:
@@ -255,21 +270,23 @@ def save_annotation():
 def delete_annotation():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        machine_id = content.get("machineId")
         month = content.get("month")
         key = content.get("key")
 
-        if not all([uid, month, key]):
+        if not all([machine_id, month, key]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
         
-        annotation_ref = db.collection('annotations').document(uid).collection(month).document(key)
+        # [MODIFIED] Path is now machine-centric
+        annotation_ref = db.collection('linac_data').document(machine_id).collection('annotations').document(month).collection('keys').document(key)
         annotation_ref.delete()
 
         event_date = key.split('-', 1)[1]
         if event_date:
-            service_event_ref = db.collection('service_events').document(uid).collection('events').document(event_date)
+            # [MODIFIED] Path is now machine-centric
+            service_event_ref = db.collection('linac_data').document(machine_id).collection('service_events').document(event_date)
             service_event_ref.delete()
-            app.logger.info(f"Deleted service event for user {uid} on date {event_date} along with annotation.")
+            app.logger.info(f"Deleted service event for machine {machine_id} on date {event_date} along with annotation.")
 
         return jsonify({'status': 'success', 'message': 'Annotation deleted successfully'}), 200
     except Exception as e:
@@ -447,11 +464,10 @@ def save_data():
         month_param = content.get("month")
         raw_data = content.get("data")
         data_type = content.get("dataType")
-        machine_id = content.get("machineId") # --- NEW: Get machineId ---
+        machine_id = content.get("machineId") 
 
         if not data_type or data_type not in DATA_TYPES:
             return jsonify({'status': 'error', 'message': 'Invalid or missing dataType'}), 400
-        # --- NEW: Check for machineId ---
         if not machine_id:
             return jsonify({'status': 'error', 'message': 'machineId is required'}), 400
 
@@ -471,10 +487,8 @@ def save_data():
 
         month_doc_id = f"Month_{month_param}"
         firestore_field_name = f"data_{data_type}"
-        # --- MODIFIED: Data is now stored under a machine's subcollection ---
         doc_ref = db.collection("linac_data").document(machine_id).collection("months").document(month_doc_id)
         
-        # --- Proactive Chat Logic ---
         old_data_doc = doc_ref.get()
         old_data = old_data_doc.to_dict().get(firestore_field_name, []) if old_data_doc.exists else []
         
@@ -503,33 +517,25 @@ def save_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- [NEW] ENDPOINT FOR SAVING DAILY ENVIRONMENTAL DATA ---
+# --- [MODIFIED] ENDPOINT FOR SAVING DAILY ENVIRONMENTAL DATA (MACHINE-AWARE) ---
 @app.route('/save-daily-env', methods=['POST'])
 def save_daily_env():
     try:
         content = request.get_json(force=True)
-        uid = content.get("uid")
+        machine_id = content.get("machineId")
         date = content.get("date") # Expecting "YYYY-MM-DD"
         temperature = content.get("temperature")
         pressure = content.get("pressure")
 
-        if not all([uid, date]):
-            return jsonify({'status': 'error', 'message': 'Missing UID or date'}), 400
-
-        user_doc = db.collection('users').document(uid).get()
-        if not user_doc.exists:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        center_id = user_doc.to_dict().get("centerId")
-
-        if not center_id:
-            return jsonify({'status': 'error', 'message': 'Missing centerId for user'}), 400
+        if not all([machine_id, date]):
+            return jsonify({'status': 'error', 'message': 'Missing machineId or date'}), 400
         
         update_data = {}
         if temperature is not None:
             try:
                 update_data['temperature_celsius'] = float(temperature)
             except (ValueError, TypeError):
-                pass # Ignore non-numeric values
+                pass
         if pressure is not None:
             try:
                 update_data['pressure_hpa'] = float(pressure)
@@ -539,8 +545,8 @@ def save_daily_env():
         if not update_data:
              return jsonify({'status': 'no_change', 'message': 'No valid data to save'}), 200
 
-        # Use set with merge=True to create or update the document
-        doc_ref = db.collection("linac_data").document(center_id).collection("daily_env").document(date)
+        # [MODIFIED] Path is now machine-centric
+        doc_ref = db.collection("linac_data").document(machine_id).collection("daily_env").document(date)
         doc_ref.set(update_data, merge=True)
 
         return jsonify({'status': 'success', 'message': f'Environmental data for {date} saved'}), 200
@@ -551,14 +557,13 @@ def save_daily_env():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-
+# --- [MODIFIED] DATA FETCHING ENDPOINT (MACHINE-AWARE) ---
 @app.route('/data', methods=['GET'])
 def get_data():
     try:
         month_param = request.args.get('month')
         uid = request.args.get('uid')
         data_type = request.args.get('dataType')
-        # --- NEW: Get machineId from request ---
         machine_id = request.args.get('machineId')
 
         if not all([month_param, uid, data_type, machine_id]):
@@ -567,20 +572,17 @@ def get_data():
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
             return jsonify({'error': 'User not found'}), 404
-        user_data = user_doc.to_dict()
-        user_status = user_data.get("status", "pending")
+        user_status = user_doc.to_dict().get("status", "pending")
 
         if user_status != "active":
             return jsonify({'error': 'Account not active'}), 403
 
-        # --- MODIFIED: Data is now stored under a machine's subcollection ---
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
         energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
         
         firestore_field_name = f"data_{data_type}"
         
-        # Path is now linac_data/{machineId}/months/{month}
         doc = db.collection("linac_data").document(machine_id).collection("months").document(f"Month_{month_param}").get()
 
         if doc.exists:
@@ -592,14 +594,12 @@ def get_data():
 
         table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
         
-        # Env data is still tied to the center, not the machine
-        center_id = user_data.get("centerId")
+        # [MODIFIED] Env data is now fetched per-machine
         env_data = {}
-        if center_id:
-            env_docs = db.collection("linac_data").document(center_id).collection("daily_env").stream()
-            for doc in env_docs:
-                if doc.id.startswith(month_param):
-                    env_data[doc.id] = doc.to_dict()
+        env_docs = db.collection("linac_data").document(machine_id).collection("daily_env").stream()
+        for doc in env_docs:
+            if doc.id.startswith(month_param):
+                env_data[doc.id] = doc.to_dict()
 
         return jsonify({'data': table, 'env_data': env_data}), 200
     except Exception as e:
@@ -616,13 +616,11 @@ def export_excel():
         month_param = content.get('month')
         uid = content.get('uid')
         data_type = content.get('dataType')
-        # --- NEW: Get machineId from request ---
         machine_id = content.get('machineId')
 
         if not all([month_param, uid, data_type, machine_id]):
             return jsonify({'error': 'Missing required parameters'}), 400
 
-        # Fetch data from Firestore using the machineId
         doc_ref = db.collection("linac_data").document(machine_id).collection("months").document(f"Month_{month_param}")
         doc = doc_ref.get()
 
@@ -671,7 +669,7 @@ def send_alert():
     try:
         content = request.get_json(force=True)
         uid = content.get("uid")
-        machine_id = content.get("machineId") # --- NEW: Get machineId ---
+        machine_id = content.get("machineId")
 
         if not all([uid, machine_id]):
             return jsonify({'status': 'error', 'message': 'Missing uid or machineId'}), 400
@@ -695,7 +693,6 @@ def send_alert():
             app.logger.warning(f"No RSO found for centerId {center_id}. Cannot send alert.")
             return jsonify({'status': 'no_rso_email', 'message': f'No RSO email found for hospital {center_id}.'}), 200
         
-        # --- MODIFIED: Alerts are now per-machine ---
         current_out_values = content.get("outValues", [])
         hospital = content.get("hospitalName", "Unknown")
         month_key = content.get("month")
@@ -706,7 +703,6 @@ def send_alert():
         machine_doc = db.collection('linacs').document(machine_id).get()
         machine_name = machine_doc.to_dict().get('machineName', machine_id) if machine_doc.exists else machine_id
 
-        # Alert record is now per-machine
         month_alerts_doc_ref = db.collection("linac_alerts").document(machine_id).collection("months").document(f"Month_{month_key}_{data_type}")
         alerts_doc_snap = month_alerts_doc_ref.get()
         
@@ -746,12 +742,11 @@ def get_predictions():
         data_type = request.args.get('dataType')
         energy = request.args.get('energy')
         month = request.args.get('month')
-        machine_id = request.args.get('machineId') # --- NEW: Get machineId ---
+        machine_id = request.args.get('machineId')
 
         if not all([uid, data_type, energy, month, machine_id]):
             return jsonify({'error': 'Missing required parameters'}), 400
 
-        # --- MODIFIED: Predictions are per-machine ---
         prediction_doc_id = f"{machine_id}_{data_type}_{energy}_{month}"
         prediction_doc = db.collection("linac_predictions").document(prediction_doc_id).get()
 
@@ -771,7 +766,6 @@ def update_live_forecast():
     # THIS ENDPOINT NEEDS TO BE UPDATED TO BE MACHINE-SPECIFIC
     return jsonify({'status': 'error', 'message': 'Endpoint not yet updated for multi-machine support.'}), 501
 
-# [MODIFIED] Endpoint now fully supports multi-machine
 @app.route('/historical-forecast', methods=['POST'])
 def get_historical_forecast():
     try:
@@ -789,12 +783,9 @@ def get_historical_forecast():
         if not all([month, data_type, energy, machine_id]):
             return jsonify({'error': 'Missing required parameters'}), 400
         
-        # This helper function is defined in the predictive_service.py but we need it here too.
-        # For simplicity, we redefine it here. In a larger app, this would be in a shared module.
         def fetch_historical_for_machine(m_id, dt, et, end_date_str):
             months_ref = db.collection("linac_data").document(m_id).collection("months").stream()
             all_vals = []
-            end_date = datetime.strptime(end_date_str, '%Y-%m')
             
             for month_doc in months_ref:
                 month_id_str = month_doc.id.replace("Month_", "")
@@ -863,7 +854,6 @@ def get_user_machines():
         return jsonify({'message': 'User is not associated with an institution.'}), 400
 
     try:
-        # --- [FIXED] Remove order_by and sort in Python to avoid composite index requirement ---
         machines_ref = db.collection('linacs').where('centerId', '==', center_id).stream()
         machines = [doc.to_dict() for doc in machines_ref]
         machines.sort(key=lambda x: x.get('machineName', ''))
@@ -1349,6 +1339,7 @@ def get_benchmark_metrics():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
         
+# --- [MODIFIED] CORRELATION ANALYSIS (MACHINE-AWARE) ---
 @app.route('/admin/correlation-analysis', methods=['GET'])
 def get_correlation_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1363,11 +1354,6 @@ def get_correlation_analysis():
 
         if not all([machine_id, data_type, energy]):
             return jsonify({'error': 'Missing required parameters'}), 400
-
-        machine_doc = db.collection('linacs').document(machine_id).get()
-        if not machine_doc.exists:
-            return jsonify({'error': 'Machine not found'}), 404
-        hospital_id = machine_doc.to_dict().get('centerId')
 
         months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
         qa_values = []
@@ -1394,7 +1380,8 @@ def get_correlation_analysis():
         qa_df = pd.DataFrame(qa_values)
         qa_df['date'] = pd.to_datetime(qa_df['date'])
 
-        env_docs = db.collection("linac_data").document(hospital_id).collection("daily_env").stream()
+        # [MODIFIED] Fetch env data from the machine-specific path
+        env_docs = db.collection("linac_data").document(machine_id).collection("daily_env").stream()
         env_values = []
         for doc in env_docs:
             data = doc.to_dict()
@@ -1402,7 +1389,7 @@ def get_correlation_analysis():
             env_values.append(data)
         
         if not env_values:
-            return jsonify({'error': 'No environmental data found for this hospital.'}), 404
+            return jsonify({'error': 'No environmental data found for this machine.'}), 404
         
         env_df = pd.DataFrame(env_values)
         env_df['date'] = pd.to_datetime(env_df['date'])
@@ -1430,6 +1417,7 @@ def get_correlation_analysis():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
+
 @app.route('/admin/users', methods=['GET'])
 def get_all_users():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1452,6 +1440,7 @@ def get_all_users():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
+
 @app.route('/admin/update-user-status', methods=['POST'])
 def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1571,7 +1560,6 @@ def delete_user():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
-# [MODIFIED] Endpoint now takes a machineId
 @app.route('/admin/hospital-data', methods=['GET'])
 def get_hospital_data():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1673,7 +1661,6 @@ def get_audit_logs():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-# [MODIFIED] Helper function now takes a machineId
 def fetch_data_for_period(machine_id, start_date, end_date):
     """
     Fetches all 'output' data for a specific machine within a date range.
@@ -1711,8 +1698,7 @@ def fetch_data_for_period(machine_id, start_date, end_date):
                     
     return data_points
 
-
-# [MODIFIED] Endpoint now takes a machineId
+# --- [MODIFIED] SERVICE IMPACT ANALYSIS (MACHINE-AWARE) ---
 @app.route('/admin/service-impact-analysis', methods=['GET'])
 def get_service_impact_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1725,18 +1711,8 @@ def get_service_impact_analysis():
         return jsonify({'message': 'machineId is required'}), 400
 
     try:
-        # Find a user for the given machine to locate service events
-        machine_doc = db.collection('linacs').document(machine_id).get()
-        if not machine_doc.exists: return jsonify([])
-        center_id = machine_doc.to_dict().get('centerId')
-
-        users_query = db.collection('users').where('centerId', '==', center_id).limit(1).stream()
-        user_uid = next((user.id for user in users_query), None)
-        
-        if not user_uid:
-            return jsonify([])
-
-        service_events_ref = db.collection('service_events').document(user_uid).collection('events')
+        # [MODIFIED] Fetch service events directly from the machine's subcollection
+        service_events_ref = db.collection('linac_data').document(machine_id).collection('service_events')
         service_events = service_events_ref.stream()
         
         analysis_results = []

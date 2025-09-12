@@ -24,7 +24,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Create Firebase Credentials File
-        run: echo "${{ secrets.FIREBASE_CREDENTIALS }}" > firebase_credentials.json
+        # [MODIFIED] Using single quotes to preserve JSON formatting
+        run: echo '${{ secrets.FIREBASE_CREDENTIALS }}' > firebase_credentials.json
 
       - name: Run Predictive Service
         run: python predictive_service.py

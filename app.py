@@ -775,20 +775,20 @@ def update_live_forecast():
 @app.route('/historical-forecast', methods=['POST'])
 def get_historical_forecast():
     try:
+        token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+        is_valid, _, _ = verify_user_token(token)
+        if not is_valid:
+            return jsonify({'error': 'Unauthorized'}), 403
+
         content = request.get_json(force=True)
-        uid = content.get('uid')
         month = content.get('month')
         data_type = content.get('dataType')
         energy = content.get('energy')
         machine_id = content.get('machineId')
 
-        if not all([uid, month, data_type, energy, machine_id]):
+        if not all([month, data_type, energy, machine_id]):
             return jsonify({'error': 'Missing required parameters'}), 400
         
-        is_valid, _, user_data = verify_user_token(uid)
-        if not is_valid:
-            return jsonify({'error': 'Invalid user'}), 403
-
         # This helper function is defined in the predictive_service.py but we need it here too.
         # For simplicity, we redefine it here. In a larger app, this would be in a shared module.
         def fetch_historical_for_machine(m_id, dt, et, end_date_str):

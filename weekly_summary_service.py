@@ -71,12 +71,10 @@ def fetch_data_for_period(machine_id, start_date, end_date):
     """Fetches all QA data types for a machine within a date range."""
     all_data = {dtype: [] for dtype in DATA_TYPES}
     
-    # Determine which month documents we need to check
     months_to_check = set()
     current_date = start_date
     while current_date <= end_date:
         months_to_check.add(current_date.strftime("Month_%Y-%m"))
-        # Move to the first day of the next month to ensure we get all unique months
         next_month_year = current_date.year if current_date.month < 12 else current_date.year + 1
         next_month = current_date.month + 1 if current_date.month < 12 else 1
         current_date = datetime(next_month_year, next_month, 1).date()
@@ -113,7 +111,6 @@ def fetch_data_for_period(machine_id, start_date, end_date):
 if __name__ == '__main__':
     print("--- 🚀 Starting Weekly Summary Service ---")
     
-    # 1. Get RSO emails for each center
     rso_map = {}
     users_ref = db.collection('users').where('role', '==', 'RSO').stream()
     for user in users_ref:
@@ -125,7 +122,6 @@ if __name__ == '__main__':
                 rso_map[center_id] = []
             rso_map[center_id].append(email)
 
-    # 2. Get all machines grouped by center
     machines_by_center = {}
     linacs_ref = db.collection('linacs').stream()
     for linac in linacs_ref:
@@ -136,13 +132,11 @@ if __name__ == '__main__':
                 machines_by_center[center_id] = []
             machines_by_center[center_id].append(linac_data)
 
-    # 3. Define date range for the last week
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=7)
     date_range_str = f"{start_date.strftime('%d-%b-%Y')} to {end_date.strftime('%d-%b-%Y')}"
     print(f"Processing data for period: {date_range_str}")
 
-    # 4. Loop through each center, generate and send the report
     for center_id, machines in machines_by_center.items():
         print(f"\nProcessing Center: {center_id}...")
         
@@ -151,7 +145,6 @@ if __name__ == '__main__':
             print(f"⚠️ No RSO found for center {center_id}. Skipping.")
             continue
         
-        # [MODIFIED] First, gather all data for the center into a dictionary of DataFrames.
         center_data_frames = {}
         for data_type in DATA_TYPES:
             weekly_data_for_type = []
@@ -166,18 +159,40 @@ if __name__ == '__main__':
             
             if weekly_data_for_type:
                 df = pd.DataFrame(weekly_data_for_type)
-                # Reorder columns for clarity
-                df = df[['Date', 'Machine', 'Energy', 'Value (%)']]
                 center_data_frames[data_type] = df
 
-        # [MODIFIED] Now, only if we actually found data, create the Excel file and send the email.
         if center_data_frames:
             print(f"  - Data found for {center_id}. Generating Excel report...")
             output_buffer = BytesIO()
-            with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+            
+            with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
                 for data_type, df in center_data_frames.items():
-                    df.to_excel(writer, sheet_name=data_type.title(), index=False)
-                    print(f"    - Added {len(df)} rows to '{data_type.title()}' sheet.")
+                    print(f"    - Processing '{data_type.title()}' sheet.")
+                    
+                    # [MODIFIED] Add a new worksheet first, which fixes the KeyError.
+                    sheet_name = data_type.title()
+                    worksheet = writer.book.add_worksheet(sheet_name)
+                    writer.sheets[sheet_name] = worksheet
+
+                    machines_with_data = df['Machine'].unique()
+                    start_row = 0
+                    for machine_name in machines_with_data:
+                        workbook = writer.book
+                        bold_format = workbook.add_format({'bold': True})
+                        worksheet.write(start_row, 0, machine_name, bold_format)
+                        start_row += 2 
+
+                        machine_df = df[df['Machine'] == machine_name]
+
+                        pivot_df = machine_df.pivot_table(
+                            index='Energy', 
+                            columns='Date', 
+                            values='Value (%)'
+                        )
+                        
+                        pivot_df.to_excel(writer, sheet_name=sheet_name, startrow=start_row)
+                        
+                        start_row += len(pivot_df.index) + 3
             
             subject = f"LINAC QA Weekly Summary: {center_id}"
             body = (f"Hello,\n\nPlease find the attached weekly summary of LINAC QA data for {center_id}.\n"

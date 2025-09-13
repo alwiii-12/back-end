@@ -79,7 +79,7 @@ def fetch_data_for_period(machine_id, start_date, end_date):
         # Move to the first day of the next month to ensure we get all unique months
         next_month_year = current_date.year if current_date.month < 12 else current_date.year + 1
         next_month = current_date.month + 1 if current_date.month < 12 else 1
-        current_date = datetime(next_month_year, next_month, 1)
+        current_date = datetime(next_month_year, next_month, 1).date()
 
     for month_doc_id in months_to_check:
         month_doc = db.collection("linac_data").document(machine_id).collection("months").document(month_doc_id).get()
@@ -98,6 +98,7 @@ def fetch_data_for_period(machine_id, start_date, end_date):
                         day = i + 1
                         try:
                             current_point_date = datetime.strptime(f"{month_str}-{day}", "%Y-%m-%d").date()
+                            
                             if start_date <= current_point_date <= end_date:
                                 if value not in [None, '']:
                                     all_data[data_type].append({
@@ -150,29 +151,34 @@ if __name__ == '__main__':
             print(f"⚠️ No RSO found for center {center_id}. Skipping.")
             continue
         
-        output_buffer = BytesIO()
-        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-            has_any_data = False
-            for data_type in DATA_TYPES:
-                weekly_data_for_type = []
-                for machine in machines:
-                    machine_id = machine.get('machineId')
-                    machine_name = machine.get('machineName', 'Unknown')
-                    
-                    data_points = fetch_data_for_period(machine_id, start_date, end_date).get(data_type, [])
-                    for point in data_points:
-                        point['Machine'] = machine_name
-                        weekly_data_for_type.append(point)
+        # [MODIFIED] First, gather all data for the center into a dictionary of DataFrames.
+        center_data_frames = {}
+        for data_type in DATA_TYPES:
+            weekly_data_for_type = []
+            for machine in machines:
+                machine_id = machine.get('machineId')
+                machine_name = machine.get('machineName', 'Unknown')
                 
-                if weekly_data_for_type:
-                    has_any_data = True
-                    df = pd.DataFrame(weekly_data_for_type)
-                    # Reorder columns for clarity
-                    df = df[['Date', 'Machine', 'Energy', 'Value (%)']]
-                    df.to_excel(writer, sheet_name=data_type.title(), index=False)
-                    print(f"  - Added {len(df)} rows to '{data_type.title()}' sheet.")
+                data_points = fetch_data_for_period(machine_id, start_date, end_date).get(data_type, [])
+                for point in data_points:
+                    point['Machine'] = machine_name
+                    weekly_data_for_type.append(point)
+            
+            if weekly_data_for_type:
+                df = pd.DataFrame(weekly_data_for_type)
+                # Reorder columns for clarity
+                df = df[['Date', 'Machine', 'Energy', 'Value (%)']]
+                center_data_frames[data_type] = df
 
-        if has_any_data:
+        # [MODIFIED] Now, only if we actually found data, create the Excel file and send the email.
+        if center_data_frames:
+            print(f"  - Data found for {center_id}. Generating Excel report...")
+            output_buffer = BytesIO()
+            with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+                for data_type, df in center_data_frames.items():
+                    df.to_excel(writer, sheet_name=data_type.title(), index=False)
+                    print(f"    - Added {len(df)} rows to '{data_type.title()}' sheet.")
+            
             subject = f"LINAC QA Weekly Summary: {center_id}"
             body = (f"Hello,\n\nPlease find the attached weekly summary of LINAC QA data for {center_id}.\n"
                     f"This report covers the period from {date_range_str}.\n\n"
@@ -180,9 +186,8 @@ if __name__ == '__main__':
             
             excel_filename = f"Weekly_QA_Summary_{center_id}_{end_date.strftime('%Y-%m-%d')}.xlsx"
             
-            # Send email to all RSOs of that center
             send_summary_email(", ".join(rso_emails), subject, body, output_buffer.getvalue(), excel_filename)
         else:
-            print(f"  - No data found for any machine in {center_id} for the last 7 days. No report sent.")
+            print(f"  - No new data found for any machine in {center_id} for the last 7 days. No report sent.")
 
     print("\n--- ✅ Weekly Summary Service Finished ---")

@@ -132,8 +132,9 @@ if __name__ == '__main__':
                 machines_by_center[center_id] = []
             machines_by_center[center_id].append(linac_data)
 
+    # [MODIFIED] The date range is now calculated from the 1st of the current month to today.
     end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=7)
+    start_date = end_date.replace(day=1)
     date_range_str = f"{start_date.strftime('%d-%b-%Y')} to {end_date.strftime('%d-%b-%Y')}"
     print(f"Processing data for period: {date_range_str}")
 
@@ -167,9 +168,6 @@ if __name__ == '__main__':
             
             with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
                 for data_type, df in center_data_frames.items():
-                    print(f"    - Processing '{data_type.title()}' sheet.")
-                    
-                    # [MODIFIED] Add a new worksheet first, which fixes the KeyError.
                     sheet_name = data_type.title()
                     worksheet = writer.book.add_worksheet(sheet_name)
                     writer.sheets[sheet_name] = worksheet
@@ -194,15 +192,15 @@ if __name__ == '__main__':
                         
                         start_row += len(pivot_df.index) + 3
             
-            subject = f"LINAC QA Weekly Summary: {center_id}"
-            body = (f"Hello,\n\nPlease find the attached weekly summary of LINAC QA data for {center_id}.\n"
-                    f"This report covers the period from {date_range_str}.\n\n"
+            subject = f"LINAC QA Cumulative Monthly Summary: {center_id}"
+            body = (f"Hello,\n\nPlease find the attached cumulative summary of LINAC QA data for {center_id}.\n"
+                    f"This report covers all data recorded from the beginning of the month to date ({date_range_str}).\n\n"
                     "Regards,\nLINAC QA Portal")
             
-            excel_filename = f"Weekly_QA_Summary_{center_id}_{end_date.strftime('%Y-%m-%d')}.xlsx"
+            excel_filename = f"Monthly_QA_Summary_{center_id}_{end_date.strftime('%Y-%m-%d')}.xlsx"
             
             send_summary_email(", ".join(rso_emails), subject, body, output_buffer.getvalue(), excel_filename)
         else:
-            print(f"  - No new data found for any machine in {center_id} for the last 7 days. No report sent.")
+            print(f"  - No new data found for any machine in {center_id} for the period. No report sent.")
 
     print("\n--- ✅ Weekly Summary Service Finished ---")

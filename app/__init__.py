@@ -1,5 +1,3 @@
-# app/__init__.py
-
 import os
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
@@ -8,6 +6,7 @@ from flask_cors import CORS
 import logging
 import jwt
 
+# --- [MODIFICATION] Import from the new services and routes structure ---
 from .services.firebase import init_firebase, app_check_module
 from .routes import auth, data, public, admin
 
@@ -30,12 +29,12 @@ def create_app():
         print("SENTRY_DSN environment variable not set. Sentry not initialized.")
 
     # --- [CORRECTED] CORS Configuration ---
-    # Add ALL your frontend URLs to this list
+    # This list now includes ALL of your frontend URLs to fix the error.
     origins = [
-        "https://host-withdraw.onrender.com", # <--- URL from your screenshot
-        "https://front-endnew.onrender.com",   # <--- URL from your original code
-        "http://127.0.0.1:5500",
-        "http://localhost:5500"
+        "https://front-endnew.onrender.com",   # From your last screenshot
+        "https://host-withdraw.onrender.com", # From your previous screenshot
+        "http://127.0.0.1:5500",               # For local testing
+        "http://localhost:5500"                 # For local testing
     ]
     CORS(app, resources={r"/*": {"origins": origins}})
     app.logger.setLevel(logging.INFO)

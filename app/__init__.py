@@ -30,10 +30,10 @@ def create_app():
         print("SENTRY_DSN environment variable not set. Sentry not initialized.")
 
     # --- [CORRECTED] CORS Configuration ---
-    # Add your new frontend URL to this list
+    # Add ALL your frontend URLs to this list
     origins = [
-        "https://host-withdraw.onrender.com", # <--- ADD THIS LINE
-        "https://front-endnew.onrender.com",
+        "https://host-withdraw.onrender.com", # <--- URL from your screenshot
+        "https://front-endnew.onrender.com",   # <--- URL from your original code
         "http://127.0.0.1:5500",
         "http://localhost:5500"
     ]

@@ -4,6 +4,7 @@ from calendar import monthrange
 import pytz
 import uuid
 import numpy as np
+import pandas as pd # Added for correlation analysis
 from scipy import stats
 import sentry_sdk
 import logging
@@ -104,7 +105,9 @@ def calculate_machine_metrics(machine_id, period_days=90):
     return results
 
 def fetch_data_for_period(machine_id, start_date, end_date):
+    """ Fetches all 'output' data for a specific machine within a date range. """
     data_points = {}
+    
     months_to_check = set()
     current_date = start_date
     while current_date <= end_date:
@@ -113,21 +116,28 @@ def fetch_data_for_period(machine_id, start_date, end_date):
     
     for month_doc_id in months_to_check:
         month_doc = db.collection("linac_data").document(machine_id).collection("months").document(month_doc_id).get()
-        if not month_doc.exists: continue
+        if not month_doc.exists:
+            continue
         
         month_data = month_doc.to_dict().get("data_output", [])
         month_str = month_doc_id.replace("Month_", "")
         
         for row in month_data:
             energy = row.get("energy")
-            if energy not in data_points: data_points[energy] = []
+            if energy not in data_points:
+                data_points[energy] = []
+                
             for i, value in enumerate(row.get("values", [])):
                 day = i + 1
                 try:
+                    # Use date objects for comparison to avoid timezone issues
                     current_point_date = datetime.strptime(f"{month_str}-{day}", "%Y-%m-%d").date()
-                    if start_date <= current_point_date <= end_date and value not in [None, '']:
-                        data_points[energy].append(float(value))
-                except (ValueError, TypeError): continue
+                    if start_date.date() <= current_point_date <= end_date.date():
+                        if value not in [None, '']:
+                            data_points[energy].append(float(value))
+                except (ValueError, TypeError):
+                    continue
+                    
     return data_points
 
 # --- SUPER ADMIN ROUTES ---
@@ -167,13 +177,19 @@ def add_institution():
 
 @bp.route('/superadmin/institution/<center_id>', methods=['DELETE'])
 def delete_institution(center_id):
-    # This will be implemented with cascade deletes later
-    return jsonify({'message': 'Endpoint not yet implemented with cascade delete'}), 501
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_super_admin, _ = verify_super_admin_token(token)
+    if not is_super_admin: return jsonify({'message': 'Unauthorized'}), 403
+    try:
+        db.collection('institutions').document(center_id).delete()
+        return jsonify({'status': 'success', 'message': 'Institution deleted successfully'}), 200
+    except Exception as e:
+        return jsonify({'message': str(e)}), 500
 
 @bp.route('/superadmin/create-admin', methods=['POST'])
 def create_admin_user():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_super_admin, _ = verify_super_admin_token(token)
+    is_super_admin, super_admin_uid = verify_super_admin_token(token)
     if not is_super_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
@@ -184,10 +200,19 @@ def create_admin_user():
         db.collection('users').document(new_user.uid).set({
             'name': name, 'email': email, 'role': 'Admin', 'status': 'active', 'managesGroup': manages_group
         })
+
+        db.collection("audit_logs").add({
+            "timestamp": firestore.SERVER_TIMESTAMP, "adminUid": super_admin_uid,
+            "action": "superadmin_create_admin", "targetUserUid": new_user.uid,
+            "details": {"created_user_email": email, "assigned_group": manages_group}
+        })
+
         return jsonify({'status': 'success', 'message': f'Admin user {email} created'}), 201
     except auth_module.EmailAlreadyExistsError:
         return jsonify({'message': 'Email already in use'}), 409
     except Exception as e:
+        if 'new_user' in locals() and new_user.uid:
+            auth_module.delete_user(new_user.uid) # Rollback auth user creation
         return jsonify({'message': str(e)}), 500
         
 # --- ADMIN ROUTES ---
@@ -210,11 +235,12 @@ def get_all_users():
 @bp.route('/admin/update-user-status', methods=['POST'])
 def update_user_status():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _, _ = verify_admin_token(token)
+    is_admin, admin_uid, _ = verify_admin_token(token)
     if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         content = request.get_json(force=True)
-        uid, updates = content.get("uid"), {}
+        uid = content.get("uid")
+        updates = {}
         if "status" in content: updates["status"] = content["status"]
         if "role" in content: updates["role"] = content["role"]
         if "hospital" in content:
@@ -222,7 +248,18 @@ def update_user_status():
             updates["centerId"] = content["hospital"]
         
         if not uid or not updates: return jsonify({'message': 'Missing fields'}), 400
-        db.collection("users").document(uid).update(updates)
+        
+        ref = db.collection("users").document(uid)
+        old_data = ref.get().to_dict() or {}
+        ref.update(updates)
+
+        changes = {k: {"old": old_data.get(k), "new": v} for k, v in updates.items()}
+        db.collection("audit_logs").add({
+            "timestamp": firestore.SERVER_TIMESTAMP, "adminUid": admin_uid,
+            "action": "user_update", "targetUserUid": uid,
+            "changes": changes, "hospital": old_data.get("hospital", "N/A")
+        })
+
         return jsonify({'status': 'success', 'message': 'User updated'}), 200
     except Exception as e:
         return jsonify({'message': str(e)}), 500
@@ -230,13 +267,22 @@ def update_user_status():
 @bp.route('/admin/delete-user', methods=['DELETE'])
 def delete_user():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _, _ = verify_admin_token(token)
+    is_admin, admin_uid, _ = verify_admin_token(token)
     if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
     try:
         uid_to_delete = request.get_json(force=True).get("uid")
         if not uid_to_delete: return jsonify({'message': 'Missing UID'}), 400
+
+        user_ref = db.collection("users").document(uid_to_delete)
+        user_data = user_ref.get().to_dict() or {}
+        
         auth_module.delete_user(uid_to_delete)
-        db.collection("users").document(uid_to_delete).delete()
+        user_ref.delete()
+        
+        db.collection("audit_logs").add({
+            "timestamp": firestore.SERVER_TIMESTAMP, "adminUid": admin_uid,
+            "action": "user_deletion", "targetUserUid": uid_to_delete, "deletedUserData": user_data
+        })
         return jsonify({'status': 'success', 'message': 'User deleted'}), 200
     except Exception as e:
         return jsonify({'message': f"Failed to delete user: {str(e)}"}), 500
@@ -290,8 +336,14 @@ def update_machine(machine_id):
 
 @bp.route('/admin/machine/<machine_id>', methods=['DELETE'])
 def delete_machine(machine_id):
-    # This will be implemented with cascade deletes later
-    return jsonify({'message': 'Endpoint not yet implemented with cascade delete'}), 501
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _, _ = verify_admin_token(token)
+    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
+    try:
+        db.collection('linacs').document(machine_id).delete()
+        return jsonify({'status': 'success', 'message': 'Machine deleted successfully'}), 200
+    except Exception as e:
+        return jsonify({'message': str(e)}), 500
 
 @bp.route('/admin/benchmark-metrics', methods=['GET'])
 def get_benchmark_metrics():
@@ -309,7 +361,7 @@ def get_benchmark_metrics():
             hospitals_ref = db.collection('institutions').where('parentGroup', '==', admin_data.get('managesGroup')).stream()
             hospital_ids = [inst.id for inst in hospitals_ref]
             if not hospital_ids: return jsonify([])
-            query = query.where('centerId', 'in', hospital_ids[:30])
+            query = query.where('centerId', 'in', hospital_ids[:30]) # Firestore 'in' query limit is 30
 
         benchmark_data = [calculate_machine_metrics(m.id, period) for m in query.stream()]
         benchmark_data.sort(key=lambda x: (x['oots'], x['warnings']), reverse=True)
@@ -329,8 +381,19 @@ def get_correlation_analysis():
         months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
         qa_values = []
         for doc in months_ref:
-            # ... (Full data extraction logic from original app.py) ...
-            pass
+            month_data = doc.to_dict()
+            field_name = f"data_{data_type}"
+            if field_name in month_data:
+                month_id_str = doc.id.replace("Month_", "")
+                year, mon = map(int, month_id_str.split("-"))
+                for row_data in month_data[field_name]:
+                    if row_data.get("energy") == energy:
+                        for i, value in enumerate(row_data.get("values", [])):
+                            day = i + 1
+                            try:
+                                if value and day <= monthrange(year, mon)[1]:
+                                    qa_values.append({"date": f"{year}-{mon:02d}-{day:02d}", "qa_value": float(value)})
+                            except (ValueError, TypeError): continue
         if not qa_values: return jsonify({'error': 'No QA data found.'}), 404
 
         env_docs = db.collection("linac_data").document(machine_id).collection("daily_env").stream()
@@ -388,10 +451,61 @@ def get_service_impact_analysis():
         service_events = db.collection('linac_data').document(machine_id).collection('service_events').stream()
         results = []
         for event in service_events:
-            service_date = datetime.strptime(event.id, "%Y-%m-%d").date()
+            service_date = datetime.strptime(event.id, "%Y-%m-%d")
             before_data = fetch_data_for_period(machine_id, service_date - timedelta(14), service_date - timedelta(1))
             after_data = fetch_data_for_period(machine_id, service_date + timedelta(1), service_date + timedelta(14))
-            # ... (Full analysis logic from original app.py) ...
+            
+            all_energies = set(before_data.keys()) | set(after_data.keys())
+            for energy in all_energies:
+                before_vals = before_data.get(energy, [])
+                after_vals = after_data.get(energy, [])
+                if not before_vals or not after_vals: continue
+
+                before_metrics = {"mean_deviation": np.mean(before_vals), "std_deviation": np.std(before_vals)}
+                after_metrics = {"mean_deviation": np.mean(after_vals), "std_deviation": np.std(after_vals)}
+                
+                improvement = 0
+                if before_metrics["std_deviation"] > 0:
+                    improvement = ((before_metrics["std_deviation"] - after_metrics["std_deviation"]) / before_metrics["std_deviation"]) * 100
+
+                results.append({
+                    "service_date": event.id, "energy": energy,
+                    "before_metrics": before_metrics, "after_metrics": after_metrics,
+                    "stability_improvement_percent": improvement,
+                    "before_data": before_vals, "after_data": after_vals
+                })
+        results.sort(key=lambda x: x['service_date'], reverse=True)
         return jsonify(results), 200
     except Exception as e:
         return jsonify({'message': str(e)}), 500
+
+@bp.route('/admin/hospital-data', methods=['GET'])
+def get_hospital_data():
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_admin, _, _ = verify_admin_token(token)
+    if not is_admin: return jsonify({'message': 'Unauthorized'}), 403
+    try:
+        machine_id = request.args.get('machineId')
+        month_param = request.args.get('month')
+        if not machine_id or not month_param:
+            return jsonify({'error': 'Missing machineId or month'}), 400
+
+        year, mon = map(int, month_param.split("-"))
+        _, num_days = monthrange(year, mon)
+        all_data = {}
+        for data_type in DATA_TYPES:
+            doc_ref = db.collection("linac_data").document(machine_id).collection("months").document(f"Month_{month_param}")
+            doc = doc_ref.get()
+            
+            energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+            if doc.exists:
+                doc_data = doc.to_dict().get(f"data_{data_type}", [])
+                for row in doc_data:
+                    energy, values = row.get("energy"), row.get("values", [])
+                    if energy in energy_dict:
+                        energy_dict[energy] = (values + [""] * num_days)[:num_days]
+            table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
+            all_data[data_type] = table
+        return jsonify({'data': all_data}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500

@@ -37,7 +37,9 @@ def create_app():
         "http://localhost:5500"                 # For local testing
     ]
     CORS(app, resources={r"/*": {"origins": origins}})
-    app.logger.setLevel(logging.INFO)
+    
+    # --- Logging Configuration ---
+    logging.basicConfig(level=logging.INFO)
 
     # --- Initialize Services ---
     init_firebase()
@@ -73,6 +75,6 @@ def create_app():
     # --- Root Endpoint ---
     @app.route('/')
     def index():
-        return "✅ LINAC QA Backend Running"
+        return "Flask backend is running!"
 
     return app

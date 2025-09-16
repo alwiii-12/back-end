@@ -1,0 +1,64 @@
+services:
+  # This is your existing web service for the Flask app
+  - type: web
+    name: back-end
+    env: python
+    buildCommand: "./post_deploy.sh"
+    startCommand: "gunicorn app:app"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.4
+      - key: SENDER_EMAIL
+        fromSecret: sender_email
+      - key: RECEIVER_EMAIL
+        fromSecret: receiver_email
+      - key: EMAIL_APP_PASSWORD
+        fromSecret: email_app_password
+      - key: FIREBASE_CREDENTIALS
+        fromSecret: firebase_credentials
+      - key: SENTRY_DSN
+        fromSecret: sentry_dsn
+
+  # This is your existing cron job for the predictive service
+  - type: cron
+    name: cron-predictive-service
+    env: python
+    schedule: "30 9 * * *" # Runs daily at 9:30 AM UTC
+    startCommand: "python predictive_service.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.4
+      - fromService:
+          type: web
+          name: back-end
+          envVar: FIREBASE_CREDENTIALS
+      - fromService:
+          type: web
+          name: back-end
+          envVar: SENDER_EMAIL
+      - fromService:
+          type: web
+          name: back-end
+          envVar: EMAIL_APP_PASSWORD
+          
+  # [NEW] This is the new cron job for the weekly summary email
+  - type: cron
+    name: cron-weekly-summary
+    env: python
+    schedule: "0 8 * * 1" # Runs every Monday at 8:00 AM UTC
+    startCommand: "python weekly_summary_service.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.4
+      - fromService:
+          type: web
+          name: back-end
+          envVar: FIREBASE_CREDENTIALS
+      - fromService:
+          type: web
+          name: back-end
+          envVar: SENDER_EMAIL
+      - fromService:
+          type: web
+          name: back-end
+          envVar: EMAIL_APP_PASSWORD

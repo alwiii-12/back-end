@@ -6,7 +6,7 @@ from flask_cors import CORS
 import logging
 import jwt
 
-# --- [MODIFICATION] Import from the new services and routes structure ---
+# Import from the new services and routes structure
 from .services.firebase import init_firebase, app_check_module
 from .routes import auth, data, public, admin
 
@@ -29,7 +29,7 @@ def create_app():
         print("SENTRY_DSN environment variable not set. Sentry not initialized.")
 
     # --- [CORRECTED] CORS Configuration ---
-    # This list now includes ALL of your frontend URLs to fix the error.
+    # This list now includes ALL of your frontend URLs to fix the errors.
     origins = [
         "https://front-endnew.onrender.com",   # From your last screenshot
         "https://host-withdraw.onrender.com", # From your previous screenshot

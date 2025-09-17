@@ -1151,7 +1151,9 @@ def add_machines():
 
             # FIX: Correctly check for duplicate machine names
             existing_machine_query = db.collection('linacs').where('centerId', '==', center_id).where('machineName', '==', name).limit(1).get()
-            if existing_machine_query:
+            
+            # The correct way to check if a query returned any documents
+            if not existing_machine_query.empty:
                 return jsonify({'message': f'A machine with name "{name}" already exists for this institution.'}), 409
                 
             machine_id = str(uuid.uuid4()) # Generate a unique ID for each machine

@@ -1149,11 +1149,9 @@ def add_machines():
         for name in machine_names:
             if not name.strip(): continue # Skip empty names
 
-            # FIX: Correctly check for duplicate machine names
-            existing_machine_query = db.collection('linacs').where('centerId', '==', center_id).where('machineName', '==', name).limit(1).get()
-            
-            # The correct way to check if a query returned any documents
-            if not existing_machine_query.empty:
+            # FIX: Check for duplicate machine name for this institution before adding
+            existing_machine = db.collection('linacs').where('centerId', '==', center_id).where('machineName', '==', name).limit(1).get()
+            if len(existing_machine) > 0:
                 return jsonify({'message': f'A machine with name "{name}" already exists for this institution.'}), 409
                 
             machine_id = str(uuid.uuid4()) # Generate a unique ID for each machine

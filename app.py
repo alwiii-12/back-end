@@ -1,29 +1,8 @@
-# --- [SENTRY INTEGRATION - NEW IMPORTS AND INITIALIZATION] ---
+# app.py
+
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 import os
-
-# Retrieve Sentry DSN from environment variable
-SENTRY_DSN = os.environ.get("SENTRY_DSN")
-
-sentry_sdk_configured = False # Flag to track Sentry initialization
-if SENTRY_DSN:
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        integrations=[
-            FlaskIntegration(),
-        ],
-        traces_sample_rate=1.0, # Capture 100% of transactions for performance monitoring
-        profiles_sample_rate=1.0, # Capture 100% of active samples for profiling
-        send_default_pii=True # Enable sending of PII (Personally Identifiable Information)
-    )
-    sentry_sdk_configured = True
-    print("Sentry initialized successfully.")
-else:
-    print("SENTRY_DSN environment variable not set. Sentry not initialized.")
-
-
-# --- [UNCHANGED IMPORTS] ---
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 import smtplib
@@ -34,44 +13,53 @@ import logging
 from calendar import monthrange
 from datetime import datetime, timedelta
 import re 
-import pytz # Import pytz for timezone handling
-import uuid # --- NEW IMPORT FOR MACHINE IDs ---
-
+import pytz
+import uuid
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, app_check
 import jwt
-
-# New imports for Excel export and historical forecast
 import pandas as pd
 from io import BytesIO
 from prophet import Prophet
-
-# New imports for Correlation Analysis
 from scipy import stats
 import numpy as np 
 
-# Set nlp to None explicitly, as it's no longer loaded
-nlp = None # This makes sure the 'nlp is None' check always passes
+# --- SENTRY INTEGRATION ---
+SENTRY_DSN = os.environ.get("SENTRY_DSN")
+
+sentry_sdk_configured = False
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[FlaskIntegration()],
+        traces_sample_rate=1.0,
+        profiles_sample_rate=1.0,
+        send_default_pii=False # IMPORTANT: Set to False to protect user data
+    )
+    sentry_sdk_configured = True
+    print("Sentry initialized successfully.")
+else:
+    print("SENTRY_DSN environment variable not set. Sentry not initialized.")
 
 
 app = Flask(__name__)
 
-# --- [CORS CONFIGURATION] ---
+# --- CORS CONFIGURATION ---
 origins = [
     "https://front-endnew.onrender.com",
-    "http://127.0.0.1:5500", # For local testing
-    "http://localhost:5500"  # For local testing
+    "http://127.0.0.1:5500",
+    "http://localhost:5500"
 ]
 CORS(app, resources={r"/*": {"origins": origins}})
 
 app.logger.setLevel(logging.DEBUG)
 
-# --- [EMAIL CONFIG] ---
+# --- EMAIL CONFIG ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
-# --- [EMAIL SENDER FUNCTION] ---
+# --- EMAIL SENDER FUNCTION ---
 def send_notification_email(recipient_email, subject, body):
     if not APP_PASSWORD:
         app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
@@ -95,10 +83,10 @@ def send_notification_email(recipient_email, subject, body):
     except Exception as e:
         app.logger.error(f"❌ Email error: {str(e)} for recipient {recipient_email}", exc_info=True)
         if sentry_sdk_configured:
-            sentry_sdk.capture_exception(e) # Capture the exception with Sentry
+            sentry_sdk.capture_exception(e)
         return False
 
-# --- [FIREBASE INIT] ---
+# --- FIREBASE INIT ---
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
 if not firebase_json:
     if sentry_sdk_configured:
@@ -118,7 +106,6 @@ db = firestore.client()
 # --- APP CHECK VERIFICATION ---
 @app.before_request
 def verify_app_check_token():
-    # List of public paths that do not require App Check
     public_paths = ['/', '/public/groups', '/public/institutions-by-group', '/public/all-institutions']
     
     if request.method == 'OPTIONS' or request.path in public_paths:
@@ -148,7 +135,7 @@ DATA_TYPE_CONFIGS = {
     "crossline": {"warning": 0.9, "tolerance": 1.0}
 }
 
-# --- [NEW] GENERIC USER TOKEN VERIFICATION ---
+# --- GENERIC USER TOKEN VERIFICATION ---
 def verify_user_token(id_token):
     """Verifies a generic user token and returns their UID and user data."""
     try:
@@ -170,7 +157,6 @@ def verify_admin_token(id_token):
         uid = decoded_token['uid']
         user_doc = db.collection('users').document(uid).get()
         user_data = user_doc.to_dict()
-        # Admins and Super Admins can access admin routes
         if user_doc.exists and user_data.get('role') in ['Admin', 'Super Admin']:
             return True, uid, user_data
     except Exception as e:
@@ -179,13 +165,11 @@ def verify_admin_token(id_token):
             sentry_sdk.capture_exception(e)
     return False, None, None
 
-# --- [NEW] PUBLIC ENDPOINTS FOR DYNAMIC SIGNUP ---
+# --- NEW PUBLIC ENDPOINTS FOR DYNAMIC SIGNUP ---
 @app.route('/public/groups', methods=['GET'])
 def get_public_groups():
-    """Fetches a unique list of all institution groups."""
     try:
         institutions_ref = db.collection('institutions').stream()
-        # Use a set to automatically handle uniqueness of group IDs
         groups = {doc.to_dict().get('parentGroup') for doc in institutions_ref if doc.to_dict().get('parentGroup')}
         return jsonify(sorted(list(groups))), 200
     except Exception as e:
@@ -194,28 +178,21 @@ def get_public_groups():
 
 @app.route('/public/institutions-by-group', methods=['GET'])
 def get_public_institutions_by_group():
-    """Fetches a list of institutions belonging to a specific group."""
     group_id = request.args.get('group')
     if not group_id:
         return jsonify({'message': 'Group ID is required.'}), 400
     try:
-        # FIX: Removed the .order_by('name') which required a composite index.
         institutions_ref = db.collection('institutions').where('parentGroup', '==', group_id).stream()
-        
         institutions = [{'name': doc.to_dict().get('name'), 'centerId': doc.to_dict().get('centerId')} for doc in institutions_ref]
-        
-        # Sort the list in Python after fetching to maintain alphabetical order for the user.
         institutions.sort(key=lambda x: x.get('name', ''))
-        
         return jsonify(institutions), 200
     except Exception as e:
         app.logger.error(f"Error fetching institutions for group {group_id}: {str(e)}", exc_info=True)
         return jsonify({'message': 'Could not retrieve institution list.'}), 500
 
-# --- [NEW] PUBLIC ENDPOINT FOR ALL INSTITUTIONS (FOR PROFILE PAGE) ---
+# --- NEW PUBLIC ENDPOINT FOR ALL INSTITUTIONS (FOR PROFILE PAGE) ---
 @app.route('/public/all-institutions', methods=['GET'])
 def get_all_institutions():
-    """Fetches a list of all institutions."""
     try:
         institutions_ref = db.collection('institutions').stream()
         institutions = [{'name': doc.to_dict().get('name'), 'centerId': doc.to_dict().get('centerId')} for doc in institutions_ref]
@@ -225,7 +202,7 @@ def get_all_institutions():
         app.logger.error(f"Error fetching all institutions: {str(e)}", exc_info=True)
         return jsonify({'message': 'Could not retrieve institution list.'}), 500
 
-# --- [MODIFIED] ANNOTATION ENDPOINTS (MACHINE-AWARE) ---
+# --- MODIFIED ANNOTATION ENDPOINTS (MACHINE-AWARE) ---
 @app.route('/save-annotation', methods=['POST'])
 def save_annotation():
     try:
@@ -238,7 +215,6 @@ def save_annotation():
         if not all([machine_id, month, key, data]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
-        # [MODIFIED] Path is now machine-centric
         annotation_ref = db.collection('linac_data').document(machine_id).collection('annotations').document(month).collection('keys').document(key)
         annotation_ref.set(data)
 
@@ -246,7 +222,6 @@ def save_annotation():
         event_date = data.get('eventDate')
         
         if event_date:
-            # [MODIFIED] Path is now machine-centric
             service_event_ref = db.collection('linac_data').document(machine_id).collection('service_events').document(event_date)
             if is_service_event:
                 service_event_ref.set({
@@ -277,13 +252,11 @@ def delete_annotation():
         if not all([machine_id, month, key]):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
         
-        # [MODIFIED] Path is now machine-centric
         annotation_ref = db.collection('linac_data').document(machine_id).collection('annotations').document(month).collection('keys').document(key)
         annotation_ref.delete()
 
         event_date = key.split('-', 1)[1]
         if event_date:
-            # [MODIFIED] Path is now machine-centric
             service_event_ref = db.collection('linac_data').document(machine_id).collection('service_events').document(event_date)
             service_event_ref.delete()
             app.logger.info(f"Deleted service event for machine {machine_id} on date {event_date} along with annotation.")
@@ -304,7 +277,6 @@ def signup():
         if any(f not in user_data or not user_data[f] for f in required):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
-        # Find the parentGroup for the selected hospital
         institution_doc = db.collection('institutions').document(user_data['hospital']).get()
         if not institution_doc.exists:
             return jsonify({'status': 'error', 'message': 'Selected institution not found.'}), 404
@@ -324,7 +296,7 @@ def signup():
             'role': user_data['role'],
             'centerId': user_data['hospital'],
             'status': user_data['status'],
-            'parentGroup': parent_group # Store the group ID with the user
+            'parentGroup': parent_group
         })
         return jsonify({'status': 'success', 'message': 'User registered'}), 200
     except Exception as e:
@@ -429,7 +401,7 @@ def update_profile():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- [MODIFIED] HELPER FUNCTION FOR PROACTIVE CHAT ---
+# --- HELPER FUNCTION FOR PROACTIVE CHAT ---
 def find_new_warnings(old_data, new_data, config):
     old_warnings = set()
     for row in old_data:
@@ -517,13 +489,13 @@ def save_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- [MODIFIED] ENDPOINT FOR SAVING DAILY ENVIRONMENTAL DATA (MACHINE-AWARE) ---
+# --- ENDPOINT FOR SAVING DAILY ENVIRONMENTAL DATA (MACHINE-AWARE) ---
 @app.route('/save-daily-env', methods=['POST'])
 def save_daily_env():
     try:
         content = request.get_json(force=True)
         machine_id = content.get("machineId")
-        date = content.get("date") # Expecting "YYYY-MM-DD"
+        date = content.get("date")
         temperature = content.get("temperature")
         pressure = content.get("pressure")
 
@@ -545,7 +517,6 @@ def save_daily_env():
         if not update_data:
              return jsonify({'status': 'no_change', 'message': 'No valid data to save'}), 200
 
-        # [MODIFIED] Path is now machine-centric
         doc_ref = db.collection("linac_data").document(machine_id).collection("daily_env").document(date)
         doc_ref.set(update_data, merge=True)
 
@@ -557,7 +528,7 @@ def save_daily_env():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- [MODIFIED] DATA FETCHING ENDPOINT (MACHINE-AWARE) ---
+# --- DATA FETCHING ENDPOINT (MACHINE-AWARE) ---
 @app.route('/data', methods=['GET'])
 def get_data():
     try:
@@ -594,7 +565,6 @@ def get_data():
 
         table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
         
-        # [MODIFIED] Env data is now fetched per-machine
         env_data = {}
         env_docs = db.collection("linac_data").document(machine_id).collection("daily_env").stream()
         for doc in env_docs:
@@ -608,7 +578,7 @@ def get_data():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- [NEW] EXPORT TO EXCEL ENDPOINT ---
+# --- NEW EXPORT TO EXCEL ENDPOINT ---
 @app.route('/export-excel', methods=['POST'])
 def export_excel():
     try:
@@ -663,7 +633,7 @@ def export_excel():
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
 
-# --- [CORRECTED] SEND ALERT ENDPOINT ---
+# --- CORRECTED SEND ALERT ENDPOINT ---
 @app.route('/send-alert', methods=['POST'])
 def send_alert():
     try:
@@ -763,7 +733,6 @@ def get_predictions():
 
 @app.route('/update-live-forecast', methods=['POST'])
 def update_live_forecast():
-    # THIS ENDPOINT NEEDS TO BE UPDATED TO BE MACHINE-SPECIFIC
     return jsonify({'status': 'error', 'message': 'Endpoint not yet updated for multi-machine support.'}), 501
 
 @app.route('/historical-forecast', methods=['POST'])
@@ -839,7 +808,7 @@ def get_historical_forecast():
         return jsonify({'error': str(e)}), 500
 
 
-# --- [NEW] ENDPOINT FOR USERS TO FETCH THEIR MACHINES ---
+# --- NEW ENDPOINT FOR USERS TO FETCH THEIR MACHINES ---
 @app.route('/user/machines', methods=['GET'])
 def get_user_machines():
     """Gets all machines for the logged-in user's institution."""
@@ -1052,7 +1021,7 @@ def add_institution():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-# --- [NEW] ENDPOINT TO DELETE AN INSTITUTION ---
+# --- NEW ENDPOINT TO DELETE AN INSTITUTION ---
 @app.route('/superadmin/institution/<center_id>', methods=['DELETE'])
 def delete_institution(center_id):
     """Deletes an institution. NOTE: This does not delete associated machines or users."""
@@ -1128,7 +1097,7 @@ def create_admin_user():
                 app.logger.error(f"Failed to clean up orphaned auth user {new_user.uid}: {cleanup_error}")
         return jsonify({'message': str(e)}), 500
 
-# --- [MODIFIED] MACHINE MANAGEMENT ENDPOINTS (NOW FOR ADMINS) ---
+# --- MODIFIED MACHINE MANAGEMENT ENDPOINTS (NOW FOR ADMINS) ---
 @app.route('/admin/machines', methods=['POST'])
 def add_machines():
     """Adds one or more new LINAC machines to an institution."""
@@ -1140,21 +1109,20 @@ def add_machines():
     try:
         content = request.get_json(force=True)
         center_id = content.get('centerId')
-        machine_names = content.get('machines') # Expects a list of names
+        machine_names = content.get('machines')
 
         if not center_id or not machine_names or not isinstance(machine_names, list):
             return jsonify({'message': 'centerId and a list of machine names are required'}), 400
 
         batch = db.batch()
         for name in machine_names:
-            if not name.strip(): continue # Skip empty names
+            if not name.strip(): continue
 
-            # FIX: Check for duplicate machine name for this institution before adding
             existing_machine = db.collection('linacs').where('centerId', '==', center_id).where('machineName', '==', name).limit(1).get()
             if len(existing_machine) > 0:
                 return jsonify({'message': f'A machine with name "{name}" already exists for this institution.'}), 409
                 
-            machine_id = str(uuid.uuid4()) # Generate a unique ID for each machine
+            machine_id = str(uuid.uuid4())
             machine_ref = db.collection('linacs').document(machine_id)
             batch.set(machine_ref, {
                 'machineId': machine_id,
@@ -1224,7 +1192,6 @@ def delete_machine(machine_id):
         return jsonify({'message': 'Unauthorized'}), 403
         
     try:
-        # This only deletes the machine record, not its historical QA data.
         db.collection('linacs').document(machine_id).delete()
         return jsonify({'status': 'success', 'message': 'Machine deleted successfully'}), 200
     except Exception as e:
@@ -1233,7 +1200,7 @@ def delete_machine(machine_id):
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
 
-# --- [MODIFIED] ADMIN ANALYSIS ENDPOINTS ---
+# --- MODIFIED ADMIN ANALYSIS ENDPOINTS ---
 def calculate_machine_metrics(machine_id, period_days=90):
     all_numeric_values = {dtype: [] for dtype in DATA_TYPES}
     warnings = 0
@@ -1345,7 +1312,7 @@ def get_benchmark_metrics():
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
         
-# --- [MODIFIED] CORRELATION ANALYSIS (MACHINE-AWARE) ---
+# --- MODIFIED CORRELATION ANALYSIS (MACHINE-AWARE) ---
 @app.route('/admin/correlation-analysis', methods=['GET'])
 def get_correlation_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1386,7 +1353,6 @@ def get_correlation_analysis():
         qa_df = pd.DataFrame(qa_values)
         qa_df['date'] = pd.to_datetime(qa_df['date'])
 
-        # [MODIFIED] Fetch env data from the machine-specific path
         env_docs = db.collection("linac_data").document(machine_id).collection("daily_env").stream()
         env_values = []
         for doc in env_docs:
@@ -1606,22 +1572,50 @@ def get_hospital_data():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'error': str(e)}), 500
+
 @app.route('/admin/audit-logs', methods=['GET'])
 def get_audit_logs():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
-    is_admin, _, _ = verify_admin_token(token)
+    is_admin, _, admin_data = verify_admin_token(token)
     if not is_admin:
         return jsonify({'message': 'Unauthorized'}), 403
 
     try:
         logs_query = db.collection("audit_logs").order_by("timestamp", direction=firestore.Query.DESCENDING)
+        
+        admin_group = admin_data.get('managesGroup')
+        
+        # Super Admins can see all logs
+        if admin_data.get('role') == 'Super Admin':
+            hospital_id = request.args.get('hospitalId')
+            if hospital_id:
+                logs_query = logs_query.where('hospital', '==', hospital_id)
+        # Regular Admins can only see logs for hospitals in their group
+        elif admin_group:
+            hospitals_in_group_ref = db.collection('institutions').where('parentGroup', '==', admin_group).stream()
+            hospital_ids = [inst.id for inst in hospitals_in_group_ref]
+            
+            requested_hospital_id = request.args.get('hospitalId')
+            
+            # If the user tries to filter by a specific hospital, ensure it's in their group
+            if requested_hospital_id:
+                if requested_hospital_id in hospital_ids:
+                    logs_query = logs_query.where('hospital', '==', requested_hospital_id)
+                else:
+                    return jsonify({'message': 'Unauthorized: Cannot access logs for this hospital.'}), 403
+            else:
+                # If no specific hospital is requested, show all logs for their group's hospitals
+                if hospital_ids:
+                    # Firestore 'in' query supports up to 10 values without a composite index.
+                    # For more than 10, a composite index on `hospital` and `timestamp` would be needed.
+                    logs_query = logs_query.where('hospital', 'in', hospital_ids)
+                else:
+                    return jsonify({"logs": []}), 200
 
-        hospital_id = request.args.get('hospitalId')
+        # Apply common filters (action and date)
         action = request.args.get('action')
         date_str = request.args.get('date')
 
-        if hospital_id:
-            logs_query = logs_query.where('hospital', '==', hospital_id)
         if action:
             logs_query = logs_query.where('action', '==', action)
         if date_str:
@@ -1666,7 +1660,8 @@ def get_audit_logs():
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
-
+        
+# --- MODIFIED SERVICE IMPACT ANALYSIS (MACHINE-AWARE) ---
 def fetch_data_for_period(machine_id, start_date, end_date):
     """
     Fetches all 'output' data for a specific machine within a date range.
@@ -1703,8 +1698,7 @@ def fetch_data_for_period(machine_id, start_date, end_date):
                     continue
                     
     return data_points
-
-# --- [MODIFIED] SERVICE IMPACT ANALYSIS (MACHINE-AWARE) ---
+    
 @app.route('/admin/service-impact-analysis', methods=['GET'])
 def get_service_impact_analysis():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1717,7 +1711,6 @@ def get_service_impact_analysis():
         return jsonify({'message': 'machineId is required'}), 400
 
     try:
-        # [MODIFIED] Fetch service events directly from the machine's subcollection
         service_events_ref = db.collection('linac_data').document(machine_id).collection('service_events')
         service_events = service_events_ref.stream()
         

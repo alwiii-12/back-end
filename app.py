@@ -128,12 +128,49 @@ def verify_app_check_token():
 # --- CONSTANTS ---
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
-DATA_TYPE_CONFIGS = {
+
+# --- [NEW] SETTINGS MANAGEMENT ---
+DEFAULT_DATA_TYPE_CONFIGS = {
     "output": {"warning": 1.8, "tolerance": 2.0},
     "flatness": {"warning": 0.9, "tolerance": 1.0},
     "inline": {"warning": 0.9, "tolerance": 1.0},
     "crossline": {"warning": 0.9, "tolerance": 1.0}
 }
+
+def get_machine_settings(machine_id):
+    """Fetches settings for a machine, returns defaults if none exist."""
+    if not machine_id:
+        return DEFAULT_DATA_TYPE_CONFIGS
+    settings_doc = db.collection('settings').document(machine_id).get()
+    if settings_doc.exists:
+        return settings_doc.to_dict()
+    return DEFAULT_DATA_TYPE_CONFIGS
+
+@app.route('/settings/<machine_id>', methods=['GET'])
+def get_settings_endpoint(machine_id):
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_valid, _, _ = verify_user_token(token)
+    if not is_valid:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    settings = get_machine_settings(machine_id)
+    return jsonify(settings), 200
+
+@app.route('/settings/<machine_id>', methods=['POST'])
+def save_settings_endpoint(machine_id):
+    token = request.headers.get("Authorization", "").split("Bearer ")[-1]
+    is_valid, _, _ = verify_user_token(token)
+    if not is_valid:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    try:
+        new_settings = request.get_json(force=True)
+        # Basic validation can be added here if needed
+        db.collection('settings').document(machine_id).set(new_settings)
+        return jsonify({'status': 'success', 'message': 'Settings saved successfully.'}), 200
+    except Exception as e:
+        app.logger.error(f"Error saving settings for {machine_id}: {str(e)}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # --- GENERIC USER TOKEN VERIFICATION ---
 def verify_user_token(id_token):
@@ -464,19 +501,24 @@ def save_data():
         old_data_doc = doc_ref.get()
         old_data = old_data_doc.to_dict().get(firestore_field_name, []) if old_data_doc.exists else []
         
-        new_warnings = find_new_warnings(old_data, raw_data, DATA_TYPE_CONFIGS[data_type])
-        
-        if new_warnings:
-            first_warning = new_warnings[0]
-            topic = "output_drift" if data_type == "output" else "flatness_warning"
-            db.collection("proactive_chats").add({
-                "uid": uid,
-                "read": False,
-                "timestamp": firestore.SERVER_TIMESTAMP,
-                "initial_message": f"I noticed a new warning for {first_warning['energy']} ({data_type.title()}). The value was {first_warning['value']}%. Would you like help diagnosing this?",
-                "topic": topic
-            })
-            app.logger.info(f"Proactive chat triggered for user {uid} due to new warnings.")
+        # [MODIFIED] Fetch machine-specific settings for checking warnings
+        machine_settings = get_machine_settings(machine_id)
+        current_data_type_config = machine_settings.get(data_type)
+
+        if current_data_type_config:
+            new_warnings = find_new_warnings(old_data, raw_data, current_data_type_config)
+            
+            if new_warnings:
+                first_warning = new_warnings[0]
+                topic = "output_drift" if data_type == "output" else "flatness_warning"
+                db.collection("proactive_chats").add({
+                    "uid": uid,
+                    "read": False,
+                    "timestamp": firestore.SERVER_TIMESTAMP,
+                    "initial_message": f"I noticed a new warning for {first_warning['energy']} ({data_type.title()}). The value was {first_warning['value']}%. Would you like help diagnosing this?",
+                    "topic": topic
+                })
+                app.logger.info(f"Proactive chat triggered for user {uid} due to new warnings.")
 
         converted = [{"row": i, "energy": row[0], "values": row[1:]} for i, row in enumerate(raw_data) if len(row) > 1]
         doc_ref.set({firestore_field_name: converted}, merge=True)
@@ -528,7 +570,7 @@ def save_daily_env():
             sentry_sdk.capture_exception(e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# --- DATA FETCHING ENDPOINT (MACHINE-AWARE) ---
+# --- DATA FETCHING ENDPOINT (MACHINE-AWARE & SETTINGS-AWARE) ---
 @app.route('/data', methods=['GET'])
 def get_data():
     try:
@@ -571,7 +613,10 @@ def get_data():
             if doc.id.startswith(month_param):
                 env_data[doc.id] = doc.to_dict()
 
-        return jsonify({'data': table, 'env_data': env_data}), 200
+        # [MODIFIED] Fetch and include machine-specific settings in the response
+        machine_settings = get_machine_settings(machine_id)
+
+        return jsonify({'data': table, 'env_data': env_data, 'settings': machine_settings}), 200
     except Exception as e:
         app.logger.error(f"Get data failed for {data_type}: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
@@ -667,7 +712,11 @@ def send_alert():
         hospital = content.get("hospitalName", "Unknown")
         month_key = content.get("month")
         data_type = content.get("dataType", "output")
-        tolerance_percent = content.get("tolerance", 2.0)
+        
+        # [MODIFIED] Fetch machine-specific settings to get the correct tolerance
+        machine_settings = get_machine_settings(machine_id)
+        tolerance_percent = machine_settings.get(data_type, {}).get("tolerance", 2.0)
+        
         data_type_display = data_type.replace("_", " ").title()
 
         machine_doc = db.collection('linacs').document(machine_id).get()
@@ -1207,6 +1256,9 @@ def calculate_machine_metrics(machine_id, period_days=90):
     oots = 0
     start_date = datetime.now() - timedelta(days=period_days)
     
+    # [MODIFIED] Fetch machine-specific settings for calculations
+    machine_settings = get_machine_settings(machine_id)
+    
     months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
 
     for month_doc in months_ref:
@@ -1219,7 +1271,7 @@ def calculate_machine_metrics(machine_id, period_days=90):
             continue
 
         month_data = month_doc.to_dict()
-        for data_type, config in DATA_TYPE_CONFIGS.items():
+        for data_type, config in machine_settings.items():
             field_name = f"data_{data_type}"
             if field_name in month_data:
                 for row in month_data[field_name]:

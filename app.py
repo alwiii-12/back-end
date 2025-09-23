@@ -55,7 +55,7 @@ CORS(app, resources={r"/*": {"origins": origins}})
 app.logger.setLevel(logging.DEBUG)
 
 # --- EMAIL CONFIG ---
-SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
+SENDER_EMAIL = os.environ.get('SENTRY_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
@@ -129,10 +129,10 @@ def verify_app_check_token():
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
 DEFAULT_ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 DEFAULT_TOLERANCES = {
-    "output": {"warning": 1.8, "tolerance": 2.0},
-    "flatness": {"warning": 0.9, "tolerance": 1.0},
-    "inline": {"warning": 0.9, "tolerance": 1.0},
-    "crossline": {"warning": 0.9, "tolerance": 1.0}
+    "output": {"warning": 1.8, "tolerance": 2.0, "yAxisMin": -3, "yAxisMax": 3},
+    "flatness": {"warning": 0.9, "tolerance": 1.0, "yAxisMin": -2, "yAxisMax": 2},
+    "inline": {"warning": 0.9, "tolerance": 1.0, "yAxisMin": -2, "yAxisMax": 2},
+    "crossline": {"warning": 0.9, "tolerance": 1.0, "yAxisMin": -2, "yAxisMax": 2}
 }
 
 # --- [MODIFIED] SETTINGS MANAGEMENT ---
@@ -145,8 +145,15 @@ def get_machine_settings(machine_id):
     if settings_doc.exists:
         settings = settings_doc.to_dict()
         # Ensure both keys exist, falling back to defaults if a key is missing
+        # Also, merge defaults for any missing nested keys (like yAxisMin/Max)
+        final_tolerances = DEFAULT_TOLERANCES.copy()
+        if "tolerances" in settings:
+            for key, value in settings["tolerances"].items():
+                if key in final_tolerances:
+                    final_tolerances[key].update(value)
+
         return {
-            "tolerances": settings.get("tolerances", DEFAULT_TOLERANCES),
+            "tolerances": final_tolerances,
             "energyTypes": settings.get("energyTypes", DEFAULT_ENERGY_TYPES)
         }
     return {"tolerances": DEFAULT_TOLERANCES, "energyTypes": DEFAULT_ENERGY_TYPES}
@@ -170,7 +177,6 @@ def save_settings_endpoint(machine_id):
 
     try:
         new_settings = request.get_json(force=True)
-        # Add validation for incoming settings data structure
         if "tolerances" not in new_settings or "energyTypes" not in new_settings:
             return jsonify({'status': 'error', 'message': 'Invalid settings format.'}), 400
             
@@ -1831,3 +1837,4 @@ def index():
 
 if __name__ == '__main__':
     app.run(debug=True)
+

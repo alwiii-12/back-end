@@ -125,26 +125,31 @@ def verify_app_check_token():
         app.logger.error(f"App Check verification failed with an unexpected error: {e}")
         return jsonify({'error': 'Unauthorized: App Check verification failed'}), 401
 
-# --- CONSTANTS ---
-ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
+# --- CONSTANTS & DEFAULTS ---
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
-
-# --- [NEW] SETTINGS MANAGEMENT ---
-DEFAULT_DATA_TYPE_CONFIGS = {
+DEFAULT_ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
+DEFAULT_TOLERANCES = {
     "output": {"warning": 1.8, "tolerance": 2.0},
     "flatness": {"warning": 0.9, "tolerance": 1.0},
     "inline": {"warning": 0.9, "tolerance": 1.0},
     "crossline": {"warning": 0.9, "tolerance": 1.0}
 }
 
+# --- [MODIFIED] SETTINGS MANAGEMENT ---
 def get_machine_settings(machine_id):
     """Fetches settings for a machine, returns defaults if none exist."""
     if not machine_id:
-        return DEFAULT_DATA_TYPE_CONFIGS
+        return {"tolerances": DEFAULT_TOLERANCES, "energyTypes": DEFAULT_ENERGY_TYPES}
+        
     settings_doc = db.collection('settings').document(machine_id).get()
     if settings_doc.exists:
-        return settings_doc.to_dict()
-    return DEFAULT_DATA_TYPE_CONFIGS
+        settings = settings_doc.to_dict()
+        # Ensure both keys exist, falling back to defaults if a key is missing
+        return {
+            "tolerances": settings.get("tolerances", DEFAULT_TOLERANCES),
+            "energyTypes": settings.get("energyTypes", DEFAULT_ENERGY_TYPES)
+        }
+    return {"tolerances": DEFAULT_TOLERANCES, "energyTypes": DEFAULT_ENERGY_TYPES}
 
 @app.route('/settings/<machine_id>', methods=['GET'])
 def get_settings_endpoint(machine_id):
@@ -165,7 +170,10 @@ def save_settings_endpoint(machine_id):
 
     try:
         new_settings = request.get_json(force=True)
-        # Basic validation can be added here if needed
+        # Add validation for incoming settings data structure
+        if "tolerances" not in new_settings or "energyTypes" not in new_settings:
+            return jsonify({'status': 'error', 'message': 'Invalid settings format.'}), 400
+            
         db.collection('settings').document(machine_id).set(new_settings)
         return jsonify({'status': 'success', 'message': 'Settings saved successfully.'}), 200
     except Exception as e:
@@ -501,9 +509,8 @@ def save_data():
         old_data_doc = doc_ref.get()
         old_data = old_data_doc.to_dict().get(firestore_field_name, []) if old_data_doc.exists else []
         
-        # [MODIFIED] Fetch machine-specific settings for checking warnings
         machine_settings = get_machine_settings(machine_id)
-        current_data_type_config = machine_settings.get(data_type)
+        current_data_type_config = machine_settings.get("tolerances", {}).get(data_type)
 
         if current_data_type_config:
             new_warnings = find_new_warnings(old_data, raw_data, current_data_type_config)
@@ -592,7 +599,10 @@ def get_data():
 
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
-        energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+        
+        machine_settings = get_machine_settings(machine_id)
+        energy_types_for_machine = machine_settings.get("energyTypes", DEFAULT_ENERGY_TYPES)
+        energy_dict = {e: [""] * num_days for e in energy_types_for_machine}
         
         firestore_field_name = f"data_{data_type}"
         
@@ -605,16 +615,13 @@ def get_data():
                 if energy in energy_dict:
                     energy_dict[energy] = (values + [""] * num_days)[:num_days]
 
-        table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
+        table = [[e] + energy_dict[e] for e in energy_types_for_machine]
         
         env_data = {}
         env_docs = db.collection("linac_data").document(machine_id).collection("daily_env").stream()
         for doc in env_docs:
             if doc.id.startswith(month_param):
                 env_data[doc.id] = doc.to_dict()
-
-        # [MODIFIED] Fetch and include machine-specific settings in the response
-        machine_settings = get_machine_settings(machine_id)
 
         return jsonify({'data': table, 'env_data': env_data, 'settings': machine_settings}), 200
     except Exception as e:
@@ -713,9 +720,8 @@ def send_alert():
         month_key = content.get("month")
         data_type = content.get("dataType", "output")
         
-        # [MODIFIED] Fetch machine-specific settings to get the correct tolerance
         machine_settings = get_machine_settings(machine_id)
-        tolerance_percent = machine_settings.get(data_type, {}).get("tolerance", 2.0)
+        tolerance_percent = machine_settings.get("tolerances", {}).get(data_type, {}).get("tolerance", 2.0)
         
         data_type_display = data_type.replace("_", " ").title()
 
@@ -1256,8 +1262,8 @@ def calculate_machine_metrics(machine_id, period_days=90):
     oots = 0
     start_date = datetime.now() - timedelta(days=period_days)
     
-    # [MODIFIED] Fetch machine-specific settings for calculations
     machine_settings = get_machine_settings(machine_id)
+    tolerances_for_machine = machine_settings.get("tolerances", DEFAULT_TOLERANCES)
     
     months_ref = db.collection("linac_data").document(machine_id).collection("months").stream()
 
@@ -1271,7 +1277,7 @@ def calculate_machine_metrics(machine_id, period_days=90):
             continue
 
         month_data = month_doc.to_dict()
-        for data_type, config in machine_settings.items():
+        for data_type, config in tolerances_for_machine.items():
             field_name = f"data_{data_type}"
             if field_name in month_data:
                 for row in month_data[field_name]:
@@ -1600,12 +1606,15 @@ def get_hospital_data():
         year, mon = map(int, month_param.split("-"))
         _, num_days = monthrange(year, mon)
         
+        machine_settings = get_machine_settings(machine_id)
+        energy_types_for_machine = machine_settings.get("energyTypes", DEFAULT_ENERGY_TYPES)
+        
         all_data = {}
         for data_type in DATA_TYPES:
             doc_ref = db.collection("linac_data").document(machine_id).collection("months").document(f"Month_{month_param}")
             doc = doc_ref.get()
             
-            energy_dict = {e: [""] * num_days for e in ENERGY_TYPES}
+            energy_dict = {e: [""] * num_days for e in energy_types_for_machine}
             if doc.exists:
                 firestore_field_name = f"data_{data_type}"
                 doc_data = doc.to_dict().get(firestore_field_name, [])
@@ -1614,7 +1623,7 @@ def get_hospital_data():
                     if energy in energy_dict:
                         energy_dict[energy] = (values + [""] * num_days)[:num_days]
 
-            table = [[e] + energy_dict[e] for e in ENERGY_TYPES]
+            table = [[e] + energy_dict[e] for e in energy_types_for_machine]
             all_data[data_type] = table
 
         return jsonify({'data': all_data}), 200

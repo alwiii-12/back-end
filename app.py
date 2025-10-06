@@ -55,6 +55,7 @@ CORS(app, resources={r"/*": {"origins": origins}})
 app.logger.setLevel(logging.DEBUG)
 
 # --- EMAIL CONFIG ---
+# [FIXED] Corrected 'SENTRY_EMAIL' to 'SENDER_EMAIL'
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
@@ -74,7 +75,8 @@ def send_notification_email(recipient_email, subject, body):
     msg.attach(MIMEText(body, 'plain'))
     
     try:
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        # [MODIFIED] Added an explicit timeout to the SMTP connection
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=20)
         server.login(SENDER_EMAIL, APP_PASSWORD)
         server.send_message(msg)
         server.quit()
@@ -144,8 +146,6 @@ def get_machine_settings(machine_id):
     settings_doc = db.collection('settings').document(machine_id).get()
     if settings_doc.exists:
         settings = settings_doc.to_dict()
-        # Ensure both keys exist, falling back to defaults if a key is missing
-        # Also, merge defaults for any missing nested keys (like yAxisMin/Max)
         final_tolerances = DEFAULT_TOLERANCES.copy()
         if "tolerances" in settings:
             for key, value in settings["tolerances"].items():

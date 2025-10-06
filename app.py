@@ -23,6 +23,9 @@ from io import BytesIO
 from prophet import Prophet
 from scipy import stats
 import numpy as np 
+# [NEW] Import SendGrid
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 # --- SENTRY INTEGRATION ---
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
@@ -56,34 +59,32 @@ app.logger.setLevel(logging.DEBUG)
 
 # --- EMAIL CONFIG ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
-APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
+# [NEW] Add SendGrid API Key from environment variables
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
 
-# --- EMAIL SENDER FUNCTION ---
+
+# --- [MODIFIED] EMAIL SENDER FUNCTION ---
 def send_notification_email(recipient_email, subject, body):
-    if not APP_PASSWORD:
-        app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: APP_PASSWORD not configured.")
-        if sentry_sdk_configured:
-            sentry_sdk.capture_message(f"EMAIL_APP_PASSWORD not set. Cannot send notification to {recipient_email}.", level="warning")
+    if not SENDGRID_API_KEY:
+        app.logger.warning(f"🚫 Cannot send notification to {recipient_email}: SENDGRID_API_KEY not configured.")
         return False
-    
-    msg = MIMEMultipart()
-    msg['From'] = SENDER_EMAIL
-    msg['To'] = recipient_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
-    
+
+    message = Mail(
+        from_email=SENDER_EMAIL,
+        to_emails=recipient_email,
+        subject=subject,
+        plain_text_content=body)
     try:
-        # [MODIFIED] Switched from port 465 (SMTP_SSL) to port 587 (TLS)
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls() # Secure the connection
-        server.login(SENDER_EMAIL, APP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        app.logger.info(f"📧 Notification sent to {recipient_email}")
-        return True
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+        if response.status_code >= 200 and response.status_code < 300:
+            app.logger.info(f"📧 Notification sent to {recipient_email} via SendGrid")
+            return True
+        else:
+            app.logger.error(f"❌ SendGrid error: {response.status_code} {response.body}")
+            return False
     except Exception as e:
-        app.logger.error(f"❌ Email error: {str(e)} for recipient {recipient_email}", exc_info=True)
+        app.logger.error(f"❌ Email error with SendGrid: {str(e)} for recipient {recipient_email}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return False

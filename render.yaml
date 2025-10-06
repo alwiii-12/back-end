@@ -4,7 +4,8 @@ services:
     name: back-end
     env: python
     buildCommand: "./post_deploy.sh"
-    startCommand: "gunicorn app:app"
+    # [MODIFIED] Added --timeout flag to give the worker more time
+    startCommand: "gunicorn --timeout 120 app:app"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
@@ -41,7 +42,7 @@ services:
           name: back-end
           envVar: EMAIL_APP_PASSWORD
           
-  # [NEW] This is the new cron job for the weekly summary email
+  # This is the cron job for the summary email
   - type: cron
     name: cron-weekly-summary
     env: python

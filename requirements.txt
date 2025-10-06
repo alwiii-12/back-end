@@ -13,3 +13,4 @@ prophet
 plotly
 scipy
 xlsxwriter
+sendgrid

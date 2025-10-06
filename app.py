@@ -55,7 +55,7 @@ CORS(app, resources={r"/*": {"origins": origins}})
 app.logger.setLevel(logging.DEBUG)
 
 # --- EMAIL CONFIG ---
-SENDER_EMAIL = os.environ.get('SENTRY_EMAIL', 'itsmealwin12@gmail.com')
+SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 

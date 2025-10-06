@@ -55,7 +55,6 @@ CORS(app, resources={r"/*": {"origins": origins}})
 app.logger.setLevel(logging.DEBUG)
 
 # --- EMAIL CONFIG ---
-# [FIXED] Corrected 'SENTRY_EMAIL' to 'SENDER_EMAIL'
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
 RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL', 'alwinjose812@gmail.com')
 APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
@@ -75,8 +74,9 @@ def send_notification_email(recipient_email, subject, body):
     msg.attach(MIMEText(body, 'plain'))
     
     try:
-        # [MODIFIED] Added an explicit timeout to the SMTP connection
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=20)
+        # [MODIFIED] Switched from port 465 (SMTP_SSL) to port 587 (TLS)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls() # Secure the connection
         server.login(SENDER_EMAIL, APP_PASSWORD)
         server.send_message(msg)
         server.quit()

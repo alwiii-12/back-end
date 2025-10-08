@@ -1035,6 +1035,7 @@ def verify_super_admin_token(id_token):
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
     return False, None
+
 @app.route('/superadmin/institutions', methods=['GET'])
 def get_institutions():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]
@@ -1043,14 +1044,27 @@ def get_institutions():
         return jsonify({'message': 'Unauthorized: Super Admin access required'}), 403
     
     try:
-        institutions_ref = db.collection('institutions').order_by("name").stream()
+        # Get all institutions
+        institutions_ref = db.collection('institutions').stream()
         institutions = [doc.to_dict() for doc in institutions_ref]
+
+        # Get all admins and create a map from parentGroup to admin email
+        admins_ref = db.collection('users').where('role', '==', 'Admin').stream()
+        admin_map = {admin.to_dict().get('managesGroup'): admin.to_dict().get('email') for admin in admins_ref}
+        
+        # Add the admin email to each institution
+        for inst in institutions:
+            inst['adminEmail'] = admin_map.get(inst.get('parentGroup'), 'N/A')
+            
+        institutions.sort(key=lambda x: x.get("name", ""))
+        
         return jsonify(institutions), 200
     except Exception as e:
         app.logger.error(f"Error getting institutions: {str(e)}", exc_info=True)
         if sentry_sdk_configured:
             sentry_sdk.capture_exception(e)
         return jsonify({'message': str(e)}), 500
+
 @app.route('/superadmin/institutions', methods=['POST'])
 def add_institution():
     token = request.headers.get("Authorization", "").split("Bearer ")[-1]

@@ -6,12 +6,16 @@ from calendar import monthrange
 import os
 import json
 from io import BytesIO
+import base64 # <-- ADDED for SendGrid attachments
 
-# Imports for sending email with attachments
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
+# --- REMOVED smtplib imports ---
+
+# --- ADDED SendGrid imports ---
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import (
+    Mail, Attachment, FileContent, FileName,
+    FileType, Disposition
+)
 
 # --- INITIALIZE FIREBASE ADMIN ---
 try:
@@ -35,36 +39,46 @@ db = firestore.client()
 
 # --- EMAIL CONFIG ---
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'itsmealwin12@gmail.com')
-APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
+# --- MODIFIED: Switched from App Password to SendGrid API Key ---
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
 DATA_TYPES = ["output", "flatness", "inline", "crossline"]
 ENERGY_TYPES = ["6X", "10X", "15X", "6X FFF", "10X FFF", "6E", "9E", "12E", "15E", "18E"]
 
+# --- REFACTORED to use SendGrid ---
 def send_summary_email(recipient_email, subject, body, attachment_data, filename):
-    """Sends an email with an Excel file attachment."""
-    if not APP_PASSWORD:
-        print(f"🚫 Cannot send summary to {recipient_email}: EMAIL_APP_PASSWORD not configured.")
+    """Sends an email with an Excel file attachment using SendGrid."""
+    if not SENDGRID_API_KEY:
+        print(f"🚫 Cannot send summary to {recipient_email}: SENDGRID_API_KEY not configured.")
         return False
     
-    msg = MIMEMultipart()
-    msg['From'] = SENDER_EMAIL
-    msg['To'] = recipient_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
-    
-    # Attach the Excel file
-    part = MIMEApplication(attachment_data, Name=filename)
-    part['Content-Disposition'] = f'attachment; filename="{filename}"'
-    msg.attach(part)
-    
+    message = Mail(
+        from_email=SENDER_EMAIL,
+        to_emails=recipient_email,
+        subject=subject,
+        plain_text_content=body
+    )
+
+    # Base64 encode the attachment data and create an Attachment object
+    encoded_file = base64.b64encode(attachment_data).decode()
+    attachedFile = Attachment(
+        FileContent(encoded_file),
+        FileName(filename),
+        FileType('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+        Disposition('attachment')
+    )
+    message.attachment = attachedFile
+
     try:
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(SENDER_EMAIL, APP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"📧 Weekly summary sent successfully to {recipient_email}")
-        return True
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+        if 200 <= response.status_code < 300:
+            print(f"📧 Weekly summary sent successfully to {recipient_email} via SendGrid")
+            return True
+        else:
+            print(f"❌ SendGrid error for weekly summary: {response.status_code} {response.body}")
+            return False
     except Exception as e:
-        print(f"❌ Email error for weekly summary: {str(e)} for recipient {recipient_email}")
+        print(f"❌ Email error with SendGrid for weekly summary: {str(e)} for recipient {recipient_email}")
         return False
 
 def fetch_data_for_period(machine_id, start_date, end_date):
@@ -132,7 +146,6 @@ if __name__ == '__main__':
                 machines_by_center[center_id] = []
             machines_by_center[center_id].append(linac_data)
 
-    # [MODIFIED] The date range is now calculated from the 1st of the current month to today.
     end_date = datetime.now().date()
     start_date = end_date.replace(day=1)
     date_range_str = f"{start_date.strftime('%d-%b-%Y')} to {end_date.strftime('%d-%b-%Y')}"

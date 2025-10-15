@@ -26,6 +26,8 @@ import numpy as np
 # [NEW] Import SendGrid
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- SENTRY INTEGRATION ---
 SENTRY_DSN = os.environ.get("SENTRY_DSN")

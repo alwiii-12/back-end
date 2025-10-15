@@ -14,3 +14,4 @@ plotly
 scipy
 xlsxwriter
 sendgrid
+python-dotenv

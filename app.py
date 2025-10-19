@@ -49,11 +49,12 @@ else:
 
 app = Flask(__name__)
 
-# --- CORS CONFIGURATION ---
+# --- [CORS CONFIGURATION] ---
 origins = [
-    "https://front-endnew.onrender.com",
-    "http://127.0.0.1:5500",
-    "http://localhost:5500"
+    "https://front-endnew.onrender.com", # Existing URL
+    "https://linac-qa-management.onrender.com", # <-- PASTE IT HERE
+    "http://127.0.0.1:5500", # Existing URL
+    "http://localhost:5500"  # Existing URL
 ]
 CORS(app, resources={r"/*": {"origins": origins}})
 

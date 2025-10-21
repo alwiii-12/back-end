@@ -5,12 +5,12 @@ firebase-admin
 pandas
 openpyxl
 sentry-sdk[flask]
-numpy
+numpy==1.26.4 # Pin to the last version before 2.0
 pytz
 PyJWT
 scikit-learn
-prophet==1.1.5  # Pinned version
-cmdstanpy==1.2.1 # Pinned version for Prophet's backend
+prophet==1.1.5
+cmdstanpy==1.2.1
 plotly
 scipy
 xlsxwriter

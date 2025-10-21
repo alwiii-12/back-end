@@ -12,9 +12,9 @@ scikit-learn
 
 # --- VERSION FIX FOR PROPHET ---
 # Pinning prophet and its dependencies to known stable versions
-# to resolve the 'stan_backend' AttributeError.
 prophet==1.1.1
 cmdstanpy==1.1.0
+holidays==0.24 # Added to fix TypeError in prophet.hdays
 # --- END FIX ---
 
 plotly

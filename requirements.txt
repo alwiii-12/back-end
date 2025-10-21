@@ -9,7 +9,8 @@ numpy
 pytz
 PyJWT
 scikit-learn
-prophet
+prophet==1.1.5  # Pinned version
+cmdstanpy==1.2.1 # Pinned version for Prophet's backend
 plotly
 scipy
 xlsxwriter
